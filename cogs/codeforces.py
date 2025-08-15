@@ -8,9 +8,9 @@ import json
 import os
 import re
 import time
-import sqlite3  # Add this import
+import sqlite3
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional  # Add this import
+from typing import List, Dict, Optional
 
 CF_LINKS_FILE = "cf_links.json"
 
@@ -75,9 +75,10 @@ async def get_random_problem(session: aiohttp.ClientSession, type_of_problem="ra
                 "name": problem["name"],
                 "link": link,
                 "tags": problem.get("tags", []),
-                "rating": problem.get("rating", "N/A")
+                "rating": problem.get("rating", "N/A"),
+                "contestId": problem["contestId"],
+                "index": problem["index"]
             }
-            await save_current_request(problem_data)
             return problem_data
 
         if type_of_problem.lower() != "random":
@@ -85,98 +86,200 @@ async def get_random_problem(session: aiohttp.ClientSession, type_of_problem="ra
 
     return None
 
-
 async def save_current_request(problem, filename="current-request.json"):
-    path = os.path.abspath(filename)
-    async with aiofiles.open(path, "w", encoding="utf-8") as f:
-        await f.write(json.dumps(problem, indent=4, ensure_ascii=False))
-
+    async with aiofiles.open(filename, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(problem, indent=4))
 
 async def load_current_request(filename="current-request.json"):
-    path = os.path.abspath(filename)
-    if not os.path.exists(path):
+    if not os.path.exists(filename):
         return None
-    async with aiofiles.open(path, "r", encoding="utf-8") as f:
-        content = await f.read()
-        return json.loads(content)
-
+    async with aiofiles.open(filename, "r", encoding="utf-8") as f:
+        return json.loads(await f.read())
 
 async def load_links() -> Dict[str, str]:
     if not os.path.exists(CF_LINKS_FILE):
         return {}
-    async with aiofiles.open(CF_LINKS_FILE, "r", encoding="utf-8") as f:
-        return json.loads(await f.read())
-
+    
+    try:
+        with open(CF_LINKS_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
 
 async def save_links(data: Dict[str, str]):
-    async with aiofiles.open(CF_LINKS_FILE, "w", encoding="utf-8") as f:
-        await f.write(json.dumps(data, indent=4))
-
+    with open(CF_LINKS_FILE, 'w') as f:
+        json.dump(data, f, indent=4)
 
 def _parse_contest_and_index_from_link(link: str) -> Optional[Dict[str, str]]:
     # Expected: https://codeforces.com/contest/{contestId}/problem/{index}
     m = re.search(r"/contest/(\d+)/problem/([A-Za-z0-9]+)", link)
     if not m:
         return None
-    return {"contestId": int(m.group(1)), "index": m.group(2)}
-
+    return {
+        "contestId": int(m.group(1)), 
+        "index": m.group(2),
+        "link": link
+    }
 
 async def _cf_check_solved(session: aiohttp.ClientSession, handle: str, contest_id: int, index: str, since_ts: int) -> bool:
     url = f"https://codeforces.com/api/user.status?handle={handle}"
-    async with session.get(url) as resp:
-        data = await resp.json()
-    if data.get("status") != "OK":
+    try:
+        async with session.get(url) as resp:
+            data = await resp.json()
+            
+        if data.get("status") != "OK":
+            return False
+
+        for sub in data["result"]:
+            if sub.get("verdict") != "OK":
+                continue
+            prob = sub.get("problem", {})
+            if prob.get("contestId") == contest_id and prob.get("index") == index:
+                # Only count solves after challenge was created
+                if sub.get("creationTimeSeconds", 0) >= since_ts:
+                    return True
+        return False
+    except Exception as e:
+        print(f"Error checking CF problem solved: {e}")
         return False
 
-    for sub in data["result"]:
-        if sub.get("verdict") != "OK":
-            continue
-        prob = sub.get("problem", {})
-        if prob.get("contestId") == contest_id and prob.get("index") == index:
-            # Only count solves after challenge start time
-            if sub.get("creationTimeSeconds", 0) >= since_ts:
-                return True
-    return False
-
-
-# ---------------- Cog ---------------- #
+# ---------------- Cog Implementation ---------------- #
 
 class Codeforces(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Add a dictionary to track active challenges
-        self.active_challenges = {}  # challenge_id -> challenge data
+        print("Codeforces cog initialized successfully!")
+    
+    @commands.Cog.listener()
+    async def on_ready(self):
+        print("Codeforces cog is ready!")
+    
+    # The _SolveView class for tracking challenges
+    class _SolveView(discord.ui.View):
+        def __init__(self, challenge_id, participants, handle_map, contest_id, index, started_ts, bot, cog):
+            super().__init__(timeout=None)  # No timeout for challenge tracking
+            self.challenge_id = challenge_id
+            self.participants = set(user.id for user in participants)
+            self.handle_map = handle_map
+            self.contest_id = contest_id
+            self.index = index
+            self.started_ts = started_ts
+            self.bot = bot
+            self.cog = cog
+            self.finished = set()
+            self.surrendered = set()
+        
+        @discord.ui.button(label="Check If Solved", style=discord.ButtonStyle.green)
+        async def check_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id not in self.participants:
+                await interaction.response.send_message("You are not part of this challenge.", ephemeral=True)
+                return
+            
+            await interaction.response.defer(ephemeral=True)
+            
+            # Get user's CF handle
+            user_id = str(interaction.user.id)
+            if user_id not in self.handle_map or not self.handle_map[user_id]:
+                await interaction.followup.send("You don't have a linked Codeforces handle.", ephemeral=True)
+                return
+            
+            handle = self.handle_map[user_id]
+            
+            # Check if the problem is solved
+            session = getattr(self.bot, "session", None)
+            solved = False
+            
+            if session:
+                solved = await _cf_check_solved(session, handle, self.contest_id, self.index, self.started_ts)
+            else:
+                async with aiohttp.ClientSession() as tmp_session:
+                    solved = await _cf_check_solved(tmp_session, handle, self.contest_id, self.index, self.started_ts)
+            
+            if solved:
+                self.finished.add(interaction.user.id)
+                if interaction.user.id in self.surrendered:
+                    self.surrendered.remove(interaction.user.id)
+                
+                await interaction.followup.send("✅ Congratulations! You've solved the problem!", ephemeral=True)
+                
+                # Update the message to reflect the current status
+                await self._update_status(interaction)
+            else:
+                await interaction.followup.send("❌ You haven't solved this problem yet.", ephemeral=True)
+        
+        @discord.ui.button(label="Surrender", style=discord.ButtonStyle.danger)
+        async def surrender(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id not in self.participants:
+                await interaction.response.send_message("You are not part of this challenge.", ephemeral=True)
+                return
+            
+            await interaction.response.defer(ephemeral=True)
+            
+            self.surrendered.add(interaction.user.id)
+            if interaction.user.id in self.finished:
+                self.finished.remove(interaction.user.id)
+            
+            await interaction.followup.send("You have surrendered this challenge.", ephemeral=True)
+            
+            # Update the message to reflect the current status
+            await self._update_status(interaction)
+        
+        async def _update_status(self, interaction):
+            # Create an updated embed
+            embed = discord.Embed(
+                title="Challenge Status Update",
+                description=f"Challenge ID: {self.challenge_id}",
+                color=discord.Color.blue()
+            )
+            
+            # Format the completed users
+            if self.finished:
+                finished_names = []
+                for user_id in self.finished:
+                    member = interaction.guild.get_member(user_id)
+                    name = member.display_name if member else f"User {user_id}"
+                    handle = self.handle_map.get(str(user_id), "Unknown")
+                    finished_names.append(f"{name} ({handle})")
+                
+                embed.add_field(
+                    name="Completed",
+                    value=", ".join(finished_names),
+                    inline=False
+                )
+            
+            # Format the surrendered users
+            if self.surrendered:
+                surrender_names = []
+                for user_id in self.surrendered:
+                    member = interaction.guild.get_member(user_id)
+                    name = member.display_name if member else f"User {user_id}"
+                    handle = self.handle_map.get(str(user_id), "Unknown")
+                    surrender_names.append(f"{name} ({handle})")
+                
+                embed.add_field(
+                    name="Surrendered",
+                    value=", ".join(surrender_names),
+                    inline=False
+                )
+                
+            # If everyone has finished or surrendered, show completion message
+            if self.finished.union(self.surrendered) == self.participants:
+                if self.surrendered:
+                    embed.add_field(
+                        name="Challenge Complete",
+                        value="All participants have completed or surrendered the challenge.",
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="Challenge Complete",
+                        value="🎉 All participants have successfully solved the problem!",
+                        inline=False
+                    )
+                
+                await interaction.channel.send(embed=embed)
 
-    # Pick Problem Command
-    @app_commands.command(name="pick_problem", description="Pick a Codeforces problem by tags and optional rating.")
-    @app_commands.describe(
-        tags="Problem tags, comma-separated (e.g., 'dp,graphs'). Leave empty or use 'random' for a random tag.",
-        rating="The problem rating (e.g., 800). Leave empty or use 'random' for a random rating."
-    )
-    @app_commands.checks.cooldown(1, 5, key=lambda i: (i.user.id))
-    async def pick_problem(self, interaction: discord.Interaction, tags: str = None, rating: str = None):
-        await interaction.response.defer()
-        type_of_problem = tags if tags else "random"
-        session = getattr(self.bot, "session", None)
-        if session is None:
-            async with aiohttp.ClientSession() as tmp_session:
-                problem = await get_random_problem(tmp_session, type_of_problem=type_of_problem, rating=rating)
-        else:
-            problem = await get_random_problem(session, type_of_problem=type_of_problem, rating=rating)
-
-        if not problem:
-            await interaction.followup.send("No problem found with the given criteria.")
-            return
-
-        embed = discord.Embed(
-            title=problem["name"],
-            url=problem["link"],
-            description=f"Tags: {', '.join(problem['tags'])}\nRating: {problem['rating']}",
-            color=discord.Color.blue()
-        )
-        await interaction.followup.send(embed=embed)
-
-    # Link CF Account
+    # Link Codeforces account command
     @app_commands.command(name="link_cf", description="Link your Codeforces account.")
     @app_commands.describe(handle="Your Codeforces handle or profile URL")
     async def link_cf(self, interaction: discord.Interaction, handle: str):
@@ -188,19 +291,11 @@ class Codeforces(commands.Cog):
             handle = handle.replace("https://codeforces.com/profile/", "")
         
         # Validate the handle exists on Codeforces
-        session = getattr(self.bot, "session", None)
         valid = False
-        
         try:
-            if session is None:
-                async with aiohttp.ClientSession() as tmp_session:
-                    async with tmp_session.get(f"https://codeforces.com/api/user.info?handles={handle}") as resp:
-                        data = await resp.json()
-                        valid = data.get("status") == "OK"
-            else:
-                async with session.get(f"https://codeforces.com/api/user.info?handles={handle}") as resp:
-                    data = await resp.json()
-                    valid = data.get("status") == "OK"
+            async with self.bot.session.get(f"https://codeforces.com/api/user.info?handles={handle}") as resp:
+                data = await resp.json()
+                valid = data.get("status") == "OK"
         except Exception as e:
             await interaction.followup.send(f"Error validating handle: {str(e)}", ephemeral=True)
             return
@@ -277,297 +372,152 @@ class Codeforces(commands.Cog):
                 f"Note: Could not assign Auth role due to an error.",
                 ephemeral=True
             )
-
-    # Display CF Info
-    @app_commands.command(name="cf_info", description="Display your linked Codeforces account info.")
-    async def cf_info(self, interaction: discord.Interaction, member: discord.Member = None):
-        member = member or interaction.user
-        links = await load_links()
-        handle = links.get(str(member.id))
-
-        if not handle:
-            await interaction.response.send_message(f"No Codeforces account linked for {member.display_name}.", ephemeral=True)
-            return
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://codeforces.com/api/user.info?handles={handle}") as resp:
-                data = await resp.json()
-
-        if data["status"] != "OK":
-            await interaction.response.send_message("Error fetching Codeforces info.", ephemeral=True)
-            return
-
-        user = data["result"][0]
-        embed = discord.Embed(
-            title=user["handle"],
-            url=f"https://codeforces.com/profile/{user['handle']}",
-            description=f"Rating: {user.get('rating', 'N/A')}\nMax Rating: {user.get('maxRating', 'N/A')}\nRank: {user.get('rank', 'N/A')}",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed)
-
-    # Show Last 10 Solved
-    @app_commands.command(name="last_10_solved", description="Show last 10 problems solved by a user (MOD only).")
-    @app_commands.checks.has_role("MOD")
-    async def last_10_solved(self, interaction: discord.Interaction, member: discord.Member):
-        links = await load_links()
-        handle = links.get(str(member.id))
-
-        if not handle:
-            await interaction.response.send_message(f"No Codeforces account linked for {member.display_name}.", ephemeral=True)
-            return
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://codeforces.com/api/user.status?handle={handle}") as resp:
-                data = await resp.json()
-
-        if data["status"] != "OK":
-            await interaction.response.send_message("Error fetching submissions.", ephemeral=True)
-            return
-
-        solved = []
-        seen = set()
-        for sub in data["result"]:
-            if sub.get("verdict") == "OK":
-                problem = sub["problem"]
-                key = (problem.get("contestId"), problem.get("index"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                name = problem["name"]
-                contest_id = problem.get("contestId")
-                index = problem.get("index")
-                link = f"https://codeforces.com/contest/{contest_id}/problem/{index}"
-                solved.append(f"{name} - {link}")
-            if len(solved) >= 10:
-                break
-
-        if not solved:
-            await interaction.response.send_message("No solved problems found.", ephemeral=True)
-            return
-
-        await interaction.response.send_message("\n".join(solved))
-
-    # ---------------- Challenge Command and Views ---------------- #
-
-    class _AcceptRejectView(discord.ui.View):
-        def __init__(self, allowed_ids: List[int], on_all_accept):
-            super().__init__(timeout=120)
-            self.allowed = set(allowed_ids)
-            self.accepted = set()
-            self.rejected = set()
-            self.on_all_accept = on_all_accept
-
-        async def interaction_check(self, interaction: discord.Interaction) -> bool:
-            if interaction.user.id not in self.allowed:
-                await interaction.response.send_message("You are not part of this challenge.", ephemeral=True)
-                return False
-            return True
-
-        @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
-        async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-            self.accepted.add(interaction.user.id)
-            await interaction.response.send_message("Accepted.", ephemeral=True)
-            if self.accepted == self.allowed:
-                # Everyone accepted before timeout -> start immediately
-                self.on_all_accept()
-                self.stop()
-
-        @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger)
-        async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-            self.rejected.add(interaction.user.id)
-            await interaction.response.send_message("Rejected.", ephemeral=True)
-
-    class _SolveView(discord.ui.View):
-        def __init__(self, challenge_id: str, participants: List[discord.Member], handle_map: Dict[int, str],
-                    contest_id: int, index: str, started_ts: int, bot: commands.Bot, cog):
-            super().__init__(timeout=None)
-            self.challenge_id = challenge_id
-            self.participants = {m.id for m in participants}
-            self.handles = handle_map
-            self.contest_id = contest_id
-            self.index = index
-            self.started_ts = started_ts
-            self.bot = bot
-            self.cog = cog
-            self.finished = set()
-            self.surrendered = set()
-            self.finish_times = {}  # User ID -> finish time
-
-        async def _check_user_solved(self, user_id: int) -> bool:
-            handle = self.handles.get(user_id)
-            if not handle:
-                return False
-            session = getattr(self.bot, "session", None)
-            if session is None:
-                async with aiohttp.ClientSession() as s:
-                    return await _cf_check_solved(s, handle, self.contest_id, self.index, self.started_ts)
-            else:
-                return await _cf_check_solved(session, handle, self.contest_id, self.index, self.started_ts)
-
-        def _can_interact(self, interaction: discord.Interaction) -> bool:
-            return interaction.user.id in self.participants
-
-        @discord.ui.button(label="Done", style=discord.ButtonStyle.success)
-        async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not self._can_interact(interaction):
-                await interaction.response.send_message("You are not part of this challenge.", ephemeral=True)
+    
+    # Unlink Codeforces account command
+    @app_commands.command(name="de_link_cf", description="Remove your linked Codeforces account.")
+    @app_commands.describe(user="The user to unlink (MOD only)")
+    async def de_link_cf(self, interaction: discord.Interaction, user: discord.Member = None):
+        """Remove your linked Codeforces account from all databases, or unlink another user (MOD only)"""
+        await interaction.response.defer(ephemeral=True)
+        
+        # Check if trying to unlink another user
+        if user is not None and user.id != interaction.user.id:
+            # Check if the command user has the MOD role
+            mod_role = discord.utils.get(interaction.guild.roles, name="MOD")
+            if not mod_role or mod_role not in interaction.user.roles:
+                await interaction.followup.send(
+                    "You need the MOD role to unlink other users' accounts.", 
+                    ephemeral=True
+                )
                 return
-
-            user_id = interaction.user.id
-            if user_id in self.finished or user_id in self.surrendered:
-                await interaction.response.send_message("You've already finished or surrendered.", ephemeral=True)
-                return
-
-            await interaction.response.defer(ephemeral=True)
-            solved = await self._check_user_solved(user_id)
-            if solved:
-                current_time = int(time.time())
-                self.finished.add(user_id)
-                self.finish_times[user_id] = current_time
+            
+            # Using the specified user
+            target_user = user
+            is_mod_action = True
+        else:
+            # Using the command author
+            target_user = interaction.user
+            is_mod_action = False
+        
+        target_id = str(target_user.id)
+        
+        # Check if the target user has a linked account
+        links = await load_links()
+        if target_id not in links:
+            await interaction.followup.send(
+                f"{'This user does not' if is_mod_action else 'You don\'t'} have a linked Codeforces account.", 
+                ephemeral=True
+            )
+            return
+        
+        # Store the handle for confirmation message
+        handle = links[target_id]
+        
+        # Remove from cf_links.json
+        del links[target_id]
+        await save_links(links)
+        
+        # Remove from leaderboard database if it exists
+        leaderboard_cog = self.bot.get_cog("Leaderboard")
+        if leaderboard_cog:
+            try:
+                async with leaderboard_cog.db_lock:
+                    conn = sqlite3.connect("leaderboard.db")
+                    cursor = conn.cursor()
+                    
+                    # Update the user's cf_handle to NULL in the users table
+                    cursor.execute(
+                        "UPDATE users SET cf_handle = NULL WHERE discord_id = ?",
+                        (target_id,)
+                    )
+                    
+                    conn.commit()
+                    conn.close()
+            except Exception as e:
+                print(f"Error updating leaderboard database: {e}")
+    
+        # Remove the Auth role
+        try:
+            # Try to get the role by name first
+            auth_role = discord.utils.get(interaction.guild.roles, name="Auth")
+            
+            # If not found by name, try to get by ID
+            if not auth_role:
+                auth_role = interaction.guild.get_role(1405358190400508005)
+            
+            if auth_role and auth_role in target_user.roles:
+                await target_user.remove_roles(auth_role, reason="Unlinked Codeforces account")
                 
-                # Calculate rank
-                rank = len(self.finished)
-                
-                # Update challenge data with finish time
-                if self.challenge_id in self.cog.active_challenges:
-                    self.cog.active_challenges[self.challenge_id]["finish_time"] = current_time
-                
-                # Get the leaderboard cog to update points
-                leaderboard_cog = self.bot.get_cog("Leaderboard")
-                if leaderboard_cog:
-                    try:
-                        # Get challenge data and add challenge_id to it
-                        challenge_data = self.cog.active_challenges.get(self.challenge_id, {}).copy()
-                        challenge_data["challenge_id"] = self.challenge_id
-                        
-                        # Award points
-                        points = leaderboard_cog.add_points(user_id, rank, challenge_data)
-                        await interaction.followup.send(
-                            f"Congratulations! You solved the problem and earned {points} points.", 
-                            ephemeral=True
-                        )
-                    except Exception as e:
-                        print(f"Error adding points: {e}")
-                        await interaction.followup.send(
-                            f"Congratulations! You solved the problem!", 
-                            ephemeral=True
-                        )
-                else:
+                if is_mod_action:
+                    # Mod action message
                     await interaction.followup.send(
-                        f"Congratulations! You solved the problem!", 
+                        f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
+                        f"The {auth_role.mention} role has been removed.",
                         ephemeral=True
                     )
-                
-                await interaction.channel.send(f"{interaction.user.mention} solved the problem! Rank: #{rank}")
-                
-                # Check if challenge is complete (everyone finished or surrendered)
-                if self.finished.union(self.surrendered) == self.participants:
-                    # Remove from active challenges
-                    if self.challenge_id in self.cog.active_challenges:
-                        del self.cog.active_challenges[self.challenge_id]
-                        
-                    # Send a summary message
-                    embed = discord.Embed(
-                        title="Challenge Complete",
-                        description="All participants have finished or surrendered.",
-                        color=discord.Color.green()
-                    )
                     
-                    # Add rankings to the summary
-                    ranked_users = sorted(
-                        [(uid, self.finish_times.get(uid, float('inf'))) for uid in self.finished],
-                        key=lambda x: x[1]
-                    )
-                    
-                    for i, (uid, finish_time) in enumerate(ranked_users, 1):
-                        member = interaction.guild.get_member(uid)
-                        name = member.display_name if member else f"User {uid}"
-                        time_taken = finish_time - self.started_ts
-                        embed.add_field(
-                            name=f"#{i}: {name}",
-                            value=f"Time: {time_taken//60}m {time_taken%60}s",
-                            inline=False
+                    # Notify the target user
+                    try:
+                        await target_user.send(
+                            f"Your Codeforces handle `{handle}` has been unlinked from your Discord account by a moderator."
                         )
-                    
-                    # Add surrendered users
-                    if self.surrendered:
-                        surrender_names = []
-                        for uid in self.surrendered:
-                            member = interaction.guild.get_member(uid)
-                            name = member.display_name if member else f"User {uid}"
-                            surrender_names.append(name)
-                        
-                        embed.add_field(
-                            name="Surrendered",
-                            value=", ".join(surrender_names),
-                            inline=False
-                        )
-                    
-                    await interaction.channel.send(embed=embed)
+                    except:
+                        pass
+                else:
+                    # Self-unlink message
+                    await interaction.followup.send(
+                        f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
+                        f"The {auth_role.mention} role has been removed.",
+                        ephemeral=True
+                    )
             else:
-                await interaction.followup.send("You haven't solved the problem yet.", ephemeral=True)
-
-        @discord.ui.button(label="Surrender", style=discord.ButtonStyle.danger)
-        async def surrender(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not self._can_interact(interaction):
-                await interaction.response.send_message("You are not part of this challenge.", ephemeral=True)
-                return
-
-            user_id = interaction.user.id
-            if user_id in self.finished or user_id in self.surrendered:
-                await interaction.response.send_message("You've already finished or surrendered.", ephemeral=True)
-                return
-
-            self.surrendered.add(user_id)
-            await interaction.response.send_message("You have surrendered.", ephemeral=True)
-            await interaction.channel.send(f"{interaction.user.mention} has surrendered!")
-            
-            # Check if challenge is complete
-            if self.finished.union(self.surrendered) == self.participants:
-                # Remove from active challenges
-                if self.challenge_id in self.cog.active_challenges:
-                    del self.cog.active_challenges[self.challenge_id]
-                    
-                # Send a summary message with rankings
-                embed = discord.Embed(
-                    title="Challenge Complete",
-                    description="All participants have finished or surrendered.",
-                    color=discord.Color.green()
-                )
-                
-                # Add rankings to the summary
-                ranked_users = sorted(
-                    [(uid, self.finish_times.get(uid, float('inf'))) for uid in self.finished],
-                    key=lambda x: x[1]
-                )
-                
-                for i, (uid, finish_time) in enumerate(ranked_users, 1):
-                    member = interaction.guild.get_member(uid)
-                    name = member.display_name if member else f"User {uid}"
-                    time_taken = finish_time - self.started_ts
-                    embed.add_field(
-                        name=f"#{i}: {name}",
-                        value=f"Time: {time_taken//60}m {time_taken%60}s",
-                        inline=False
+                if is_mod_action:
+                    await interaction.followup.send(
+                        f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`",
+                        ephemeral=True
                     )
-                
-                # Add surrendered users
-                if self.surrendered:
-                    surrender_names = []
-                    for uid in self.surrendered:
-                        member = interaction.guild.get_member(uid)
-                        name = member.display_name if member else f"User {uid}"
-                        surrender_names.append(name)
                     
-                    embed.add_field(
-                        name="Surrendered",
-                        value=", ".join(surrender_names),
-                        inline=False
+                    # Notify the target user
+                    try:
+                        await target_user.send(
+                            f"Your Codeforces handle `{handle}` has been unlinked from your Discord account by a moderator."
+                        )
+                    except:
+                        pass
+                else:
+                    await interaction.followup.send(
+                        f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`",
+                        ephemeral=True
                     )
-                
-                await interaction.channel.send(embed=embed)
-
+        except discord.Forbidden:
+            if is_mod_action:
+                await interaction.followup.send(
+                    f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
+                    f"Note: Could not remove Auth role (insufficient permissions).",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
+                    f"Note: Could not remove Auth role (insufficient permissions).",
+                    ephemeral=True
+                )
+        except Exception as e:
+            print(f"Error removing Auth role: {e}")
+            if is_mod_action:
+                await interaction.followup.send(
+                    f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
+                    f"Note: Could not remove Auth role due to an error.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
+                    f"Note: Could not remove Auth role due to an error.",
+                    ephemeral=True
+                )
+    
+    # Challenge command
     @app_commands.command(
         name="challenge", 
         description="Challenge Auth users to solve a CF problem. Members must be mentioned and have Auth role."
@@ -579,6 +529,7 @@ class Codeforces(commands.Cog):
     )
     async def challenge(self, interaction: discord.Interaction, members: str, tags: str = "random", rating: str = "random"):
         """Challenge users to solve a Codeforces problem"""
+        print("Challenge command called!")
         await interaction.response.defer()
         
         # Parse mentions (supports comma-separated, space-separated, or both)
@@ -884,195 +835,8 @@ class Codeforces(commands.Cog):
                 view=view
             )
 
-    # Optional: Command to list active challenges
-    @app_commands.command(name="active_challenges", description="List all active challenges")
-    async def active_challenges(self, interaction: discord.Interaction):
-        if not self.active_challenges:
-            await interaction.response.send_message("There are no active challenges.", ephemeral=True)
-            return
-            
-        embed = discord.Embed(
-            title="Active Challenges",
-            description=f"There are {len(self.active_challenges)} active challenges",
-            color=discord.Color.blue()
-        )
-        
-        for challenge_id, data in self.active_challenges.items():
-            problem = data["problem"]
-            participant_count = len(data["participants"])
-            creator = interaction.guild.get_member(data["creator"])
-            creator_name = creator.display_name if creator else "Unknown"
-            
-            embed.add_field(
-                name=f"Challenge by {creator_name}",
-                value=f"Problem: [{problem['name']}]({problem['link']})\n"
-                      f"Participants: {participant_count}\n"
-                      f"Rating: {problem.get('rating', 'Unknown')}\n"
-                      f"Started: <t:{data['started_ts']}:R>",
-                inline=False
-            )
-            
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="de_link_cf", description="Remove your linked Codeforces account.")
-    @app_commands.describe(user="The user to unlink (MOD only)")
-    async def de_link_cf(self, interaction: discord.Interaction, user: discord.Member = None):
-        """Remove your linked Codeforces account from all databases, or unlink another user (MOD only)"""
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check if trying to unlink another user
-        if user is not None and user.id != interaction.user.id:
-            # Check if the command user has the MOD role
-            mod_role = discord.utils.get(interaction.guild.roles, name="MOD")
-            if not mod_role or mod_role not in interaction.user.roles:
-                await interaction.followup.send(
-                    "You need the MOD role to unlink other users' accounts.", 
-                    ephemeral=True
-                )
-                return
-            
-            # Using the specified user
-            target_user = user
-            is_mod_action = True
-        else:
-            # Using the command author
-            target_user = interaction.user
-            is_mod_action = False
-        
-        target_id = str(target_user.id)
-        
-        # Check if the target user has a linked account
-        links = await load_links()
-        if target_id not in links:
-            await interaction.followup.send(
-                f"{'This user does not' if is_mod_action else 'You don\'t'} have a linked Codeforces account.", 
-                ephemeral=True
-            )
-            return
-        
-        # Store the handle for confirmation message
-        handle = links[target_id]
-        
-        # Remove from cf_links.json
-        del links[target_id]
-        await save_links(links)
-        
-        # Remove from leaderboard database if it exists
-        leaderboard_cog = self.bot.get_cog("Leaderboard")
-        if leaderboard_cog:
-            try:
-                async with leaderboard_cog.db_lock:
-                    conn = sqlite3.connect("leaderboard.db")
-                    cursor = conn.cursor()
-                    
-                    # Update the user's cf_handle to NULL in the users table
-                    cursor.execute(
-                        "UPDATE users SET cf_handle = NULL WHERE discord_id = ?",
-                        (target_id,)
-                    )
-                    
-                    conn.commit()
-                    conn.close()
-            except Exception as e:
-                print(f"Error updating leaderboard database: {e}")
-    
-        # Remove from temp_contests database if it exists
-        try:
-            conn = sqlite3.connect("temp_contests.db")
-            cursor = conn.cursor()
-            
-            # We don't delete the user from the contests, but we can update references
-            # to the cf_handle if there's a column for it
-            # This part depends on your database schema
-            
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"Error updating temp_contests database: {e}")
-    
-        # Remove the Auth role
-        try:
-            # Try to get the role by name first
-            auth_role = discord.utils.get(interaction.guild.roles, name="Auth")
-            
-            # If not found by name, try to get by ID
-            if not auth_role:
-                auth_role = interaction.guild.get_role(1405358190400508005)
-            
-            if auth_role and auth_role in target_user.roles:
-                await target_user.remove_roles(auth_role, reason="Unlinked Codeforces account")
-                
-                if is_mod_action:
-                    # Mod action message
-                    await interaction.followup.send(
-                        f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
-                        f"The {auth_role.mention} role has been removed.",
-                        ephemeral=True
-                    )
-                    
-                    # Notify the target user
-                    try:
-                        await target_user.send(
-                            f"Your Codeforces handle `{handle}` has been unlinked from your Discord account by a moderator."
-                        )
-                    except:
-                        # Can't DM the user, that's fine
-                        pass
-                else:
-                    # Self-unlink message
-                    await interaction.followup.send(
-                        f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
-                        f"The {auth_role.mention} role has been removed.",
-                        ephemeral=True
-                    )
-            else:
-                if is_mod_action:
-                    await interaction.followup.send(
-                        f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`",
-                        ephemeral=True
-                    )
-                    
-                    # Notify the target user
-                    try:
-                        await target_user.send(
-                            f"Your Codeforces handle `{handle}` has been unlinked from your Discord account by a moderator."
-                        )
-                    except:
-                        # Can't DM the user, that's fine
-                        pass
-                else:
-                    await interaction.followup.send(
-                        f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`",
-                        ephemeral=True
-                    )
-        except discord.Forbidden:
-            if is_mod_action:
-                await interaction.followup.send(
-                    f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
-                    f"Note: Could not remove Auth role (insufficient permissions).",
-                    ephemeral=True
-                )
-            else:
-                await interaction.followup.send(
-                    f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
-                    f"Note: Could not remove Auth role (insufficient permissions).",
-                    ephemeral=True
-                )
-        except Exception as e:
-            print(f"Error removing Auth role: {e}")
-            if is_mod_action:
-                await interaction.followup.send(
-                    f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
-                    f"Note: Could not remove Auth role due to an error.",
-                    ephemeral=True
-                )
-            else:
-                await interaction.followup.send(
-                    f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
-                    f"Note: Could not remove Auth role due to an error.",
-                    ephemeral=True
-                )
-
-# Add this at the end of your file, outside the class
+# Setup function at the end of the file
 async def setup(bot):
+    print("Setting up Codeforces cog...")
     await bot.add_cog(Codeforces(bot))
+    print("Codeforces cog setup complete!")

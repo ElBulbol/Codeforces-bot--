@@ -10,6 +10,7 @@ import aiohttp
 import json
 import re
 import sqlite3
+import inspect
 
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
@@ -35,13 +36,12 @@ class MyBot(commands.Bot):
         for extension in self.initial_extensions:
             try:
                 await self.load_extension(extension)
-                print(f"Loaded extension: {extension}")
+                print(f"✅ Loaded extension: {extension}")
             except Exception as e:
-                print(f"Failed to load extension {extension}: {e}")
+                print(f"❌ Failed to load extension {extension}: {e}")
         
-        # Sync commands with Discord
-        await self.tree.sync()
-        print("Commands synced.")
+        # Initial sync will happen in on_ready with delay
+        print("Initial setup complete, will sync commands after bot is ready")
         
     async def close(self):
         if hasattr(self, 'session'):
@@ -51,12 +51,18 @@ class MyBot(commands.Bot):
     async def on_ready(self):
         print(f"Bot is online as {self.user.name}")
         await self.change_presence(activity=discord.Game(name="/help"))
+
+        # Delay sync to ensure all cogs are fully loaded
+        await asyncio.sleep(2)
         
+        # Force sync to ensure all new commands are registered
+        await self.tree.sync()
+
         # Improved command logging
         registered_commands = await self.tree.fetch_commands()
         command_names = [cmd.name for cmd in registered_commands]
-        command_names.sort()  # Sort alphabetically for easier reading
-        
+        command_names.sort()
+
         print("Registered commands:")
         for cmd_name in command_names:
             print(f"  - {cmd_name}")
@@ -73,258 +79,8 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# Utility functions for link_cf command
-async def load_links():
-    """Load the CodeForces links from file"""
-    if not os.path.exists(CF_LINKS_FILE):
-        return {}
-    
-    try:
-        with open(CF_LINKS_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {}
-
-async def save_links(data):
-    """Save the CodeForces links to file"""
-    with open(CF_LINKS_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
-
-@bot.tree.command(name="link_cf", description="Link your Codeforces account.")
-@app_commands.describe(handle="Your Codeforces handle or profile URL")
-async def link_cf(interaction: discord.Interaction, handle: str):
-    """Link a Codeforces handle to your Discord account"""
-    await interaction.response.defer(ephemeral=True)
-    
-    # Extract handle if a full URL is provided
-    if handle.startswith("https://codeforces.com/profile/"):
-        handle = handle.replace("https://codeforces.com/profile/", "")
-    
-    # Validate the handle exists on Codeforces
-    valid = False
-    try:
-        async with bot.session.get(f"https://codeforces.com/api/user.info?handles={handle}") as resp:
-            data = await resp.json()
-            valid = data.get("status") == "OK"
-    except Exception as e:
-        await interaction.followup.send(f"Error validating handle: {str(e)}", ephemeral=True)
-        return
-    
-    if not valid:
-        await interaction.followup.send(f"Could not find Codeforces handle: `{handle}`", ephemeral=True)
-        return
-    
-    # Load existing links
-    links = await load_links()
-    
-    # Check if handle is already linked to another user
-    for user_id, linked_handle in links.items():
-        if linked_handle.lower() == handle.lower() and user_id != str(interaction.user.id):
-            await interaction.followup.send(
-                f"Error: The Codeforces handle `{handle}` is already linked to another Discord user. "
-                f"Each Codeforces handle can only be linked to one Discord account.",
-                ephemeral=True
-            )
-            return
-    
-    # Update the link
-    links[str(interaction.user.id)] = handle
-    await save_links(links)
-    
-    # Update the user in leaderboard database if it exists
-    leaderboard_cog = bot.get_cog("Leaderboard")
-    if leaderboard_cog:
-        try:
-            async with leaderboard_cog.db_lock:
-                conn = sqlite3.connect("leaderboard.db")
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT OR REPLACE INTO users (discord_id, cf_handle) VALUES (?, ?)",
-                    (str(interaction.user.id), handle)
-                )
-                conn.commit()
-                conn.close()
-        except Exception as e:
-            print(f"Error updating leaderboard database: {e}")
-    
-    # Assign the Auth role to the user
-    try:
-        # Try to get the role by name first
-        auth_role = discord.utils.get(interaction.guild.roles, name="Auth")
-        
-        # If not found by name, try to get by ID
-        if not auth_role:
-            auth_role = interaction.guild.get_role(1405358190400508005)
-        
-        if auth_role:
-            await interaction.user.add_roles(auth_role, reason="Linked Codeforces account")
-            await interaction.followup.send(
-                f"Successfully linked your Discord account to Codeforces handle: `{handle}`\n"
-                f"You have been given the {auth_role.mention} role!",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                f"Successfully linked your Discord account to Codeforces handle: `{handle}`\n"
-                f"Note: Could not assign Auth role (not found).",
-                ephemeral=True
-            )
-    except discord.Forbidden:
-        await interaction.followup.send(
-            f"Successfully linked your Discord account to Codeforces handle: `{handle}`\n"
-            f"Note: Could not assign Auth role (insufficient permissions).",
-            ephemeral=True
-        )
-    except Exception as e:
-        print(f"Error assigning Auth role: {e}")
-        await interaction.followup.send(
-            f"Successfully linked your Discord account to Codeforces handle: `{handle}`\n"
-            f"Note: Could not assign Auth role due to an error.",
-            ephemeral=True
-        )
-
-@bot.tree.command(name="de_link_cf", description="Remove your linked Codeforces account.")
-@app_commands.describe(user="The user to unlink (MOD only)")
-async def de_link_cf(interaction: discord.Interaction, user: discord.Member = None):
-    """Remove your linked Codeforces account from all databases, or unlink another user (MOD only)"""
-    await interaction.response.defer(ephemeral=True)
-    
-    # Check if trying to unlink another user
-    if user is not None and user.id != interaction.user.id:
-        # Check if the command user has the MOD role
-        mod_role = discord.utils.get(interaction.guild.roles, name="MOD")
-        if not mod_role or mod_role not in interaction.user.roles:
-            await interaction.followup.send(
-                "You need the MOD role to unlink other users' accounts.", 
-                ephemeral=True
-            )
-            return
-        
-        # Using the specified user
-        target_user = user
-        is_mod_action = True
-    else:
-        # Using the command author
-        target_user = interaction.user
-        is_mod_action = False
-    
-    target_id = str(target_user.id)
-    
-    # Check if the target user has a linked account
-    links = await load_links()
-    if target_id not in links:
-        await interaction.followup.send(
-            f"{'This user does not' if is_mod_action else 'You don\'t'} have a linked Codeforces account.", 
-            ephemeral=True
-        )
-        return
-    
-    # Store the handle for confirmation message
-    handle = links[target_id]
-    
-    # Remove from cf_links.json
-    del links[target_id]
-    await save_links(links)
-    
-    # Remove from leaderboard database if it exists
-    leaderboard_cog = bot.get_cog("Leaderboard")
-    if leaderboard_cog:
-        try:
-            async with leaderboard_cog.db_lock:
-                conn = sqlite3.connect("leaderboard.db")
-                cursor = conn.cursor()
-                
-                # Update the user's cf_handle to NULL in the users table
-                cursor.execute(
-                    "UPDATE users SET cf_handle = NULL WHERE discord_id = ?",
-                    (target_id,)
-                )
-                
-                conn.commit()
-                conn.close()
-        except Exception as e:
-            print(f"Error updating leaderboard database: {e}")
-    
-    # Remove the Auth role
-    try:
-        # Try to get the role by name first
-        auth_role = discord.utils.get(interaction.guild.roles, name="Auth")
-        
-        # If not found by name, try to get by ID
-        if not auth_role:
-            auth_role = interaction.guild.get_role(1405358190400508005)
-        
-        if auth_role and auth_role in target_user.roles:
-            await target_user.remove_roles(auth_role, reason="Unlinked Codeforces account")
-            
-            if is_mod_action:
-                # Mod action message
-                await interaction.followup.send(
-                    f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
-                    f"The {auth_role.mention} role has been removed.",
-                    ephemeral=True
-                )
-                
-                # Notify the target user
-                try:
-                    await target_user.send(
-                        f"Your Codeforces handle `{handle}` has been unlinked from your Discord account by a moderator."
-                    )
-                except:
-                    pass
-            else:
-                # Self-unlink message
-                await interaction.followup.send(
-                    f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
-                    f"The {auth_role.mention} role has been removed.",
-                    ephemeral=True
-                )
-        else:
-            if is_mod_action:
-                await interaction.followup.send(
-                    f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`",
-                    ephemeral=True
-                )
-                
-                # Notify the target user
-                try:
-                    await target_user.send(
-                        f"Your Codeforces handle `{handle}` has been unlinked from your Discord account by a moderator."
-                    )
-                except:
-                    pass
-            else:
-                await interaction.followup.send(
-                    f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`",
-                    ephemeral=True
-                )
-    except discord.Forbidden:
-        if is_mod_action:
-            await interaction.followup.send(
-                f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
-                f"Note: Could not remove Auth role (insufficient permissions).",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
-                f"Note: Could not remove Auth role (insufficient permissions).",
-                ephemeral=True
-            )
-    except Exception as e:
-        print(f"Error removing Auth role: {e}")
-        if is_mod_action:
-            await interaction.followup.send(
-                f"Successfully unlinked {target_user.mention}'s Discord account from Codeforces handle: `{handle}`\n"
-                f"Note: Could not remove Auth role due to an error.",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                f"Successfully unlinked your Discord account from Codeforces handle: `{handle}`\n"
-                f"Note: Could not remove Auth role due to an error.",
-                ephemeral=True
-            )
+# NOTE: The link_cf and de_link_cf commands have been moved to codeforces.py
+# Their definitions have been removed from here
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -378,6 +134,16 @@ async def sync(ctx):
 
 @bot.command()
 @commands.is_owner()
+async def guild_sync(ctx):
+    """Sync commands to this guild only (faster for testing)."""
+    await ctx.send("Syncing commands to this guild...")
+    synced = await bot.tree.sync(guild=ctx.guild)
+    await ctx.send(f"Synced {len(synced)} commands to this guild!")
+    command_names = [cmd.name for cmd in synced]
+    await ctx.send(f"Command names: {', '.join(command_names)}")
+
+@bot.command()
+@commands.is_owner()
 async def check_commands(ctx):
     """Check what commands are registered."""
     commands = await bot.tree.fetch_commands()
@@ -390,27 +156,13 @@ async def force_sync(ctx):
     """Force sync all application commands."""
     await ctx.send("Syncing commands...")
     
-    # Temporarily remove all existing commands
+    # Clear and resync commands
     bot.tree.clear_commands(guild=None)
-    await bot.tree.sync()
-    
-    # Reload all cogs
-    reloaded = []
-    failed = []
-    for extension in bot.initial_extensions:
-        try:
-            await bot.reload_extension(extension)
-            reloaded.append(extension)
-        except Exception as e:
-            failed.append(f"{extension}: {e}")
-    
-    await ctx.send(f"Reloaded cogs: {', '.join(reloaded) or 'None'}")
-    if failed:
-        await ctx.send(f"Failed to reload: {', '.join(failed)}")
-    
-    # Sync again to register all commands
     synced = await bot.tree.sync()
-    await ctx.send(f"Synced {len(synced)} commands: {', '.join(c.name for c in synced)}")
+    
+    # Print the synced commands
+    command_names = [cmd.name for cmd in synced]
+    await ctx.send(f"Synced {len(synced)} commands: {', '.join(command_names)}")
 
 @bot.command()
 @commands.is_owner()
@@ -426,6 +178,11 @@ async def debug_cogs(ctx):
         # Check if it has the challenge method
         if hasattr(codeforces_cog, 'challenge'):
             await ctx.send("✅ Challenge method exists")
+            
+            # Check the method's parameters
+            sig = inspect.signature(codeforces_cog.challenge)
+            params = list(sig.parameters.keys())
+            await ctx.send(f"Method parameters: {params}")
         else:
             await ctx.send("❌ Challenge method not found in cog")
     else:
@@ -435,6 +192,36 @@ async def debug_cogs(ctx):
         for cog_name in bot.cogs:
             if cog_name.lower() == 'codeforces':
                 await ctx.send(f"Found cog with similar name: {cog_name}")
+
+@bot.command()
+@commands.is_owner()
+async def debug_command(ctx, command_name: str):
+    """Debug a specific command"""
+    await ctx.send(f"Debugging command: {command_name}")
+    
+    # Search for the command in global commands
+    global_commands = await bot.tree.fetch_commands()
+    command = None
+    for cmd in global_commands:
+        if cmd.name == command_name:
+            command = cmd
+            break
+    
+    if command:
+        await ctx.send(f"✅ Command found in global commands: {command.name}")
+        await ctx.send(f"Description: {command.description}")
+        await ctx.send(f"Parameters: {[p.name for p in command.parameters]}")
+    else:
+        await ctx.send(f"❌ Command not found in global commands")
+    
+    # Check all cogs for the command
+    for cog_name, cog in bot.cogs.items():
+        for method_name, method in inspect.getmembers(cog, predicate=inspect.ismethod):
+            if hasattr(method, "binding") and isinstance(method.binding, app_commands.Command):
+                if method.binding.name == command_name:
+                    await ctx.send(f"✅ Command found in cog: {cog_name}.{method_name}")
+                    await ctx.send(f"Description: {method.binding.description}")
+                    await ctx.send(f"Parameters: {[p.name for p in method.binding.parameters]}")
 
 if __name__ == "__main__":
     setup_logging()
