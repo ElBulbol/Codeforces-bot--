@@ -16,7 +16,8 @@ from utility.db_helpers import (
     get_all_cf_handles,
     increment_user_solved_count
 )
-
+import sqlite3
+import os
 
 def _parse_contest_and_index_from_link(link: str) -> Optional[Dict[str, str]]:
     # Expected: https://codeforces.com/contest/{contestId}/problem/{index}
@@ -331,7 +332,9 @@ class Challenges(commands.Cog):
                 self.valid_users = {user.id for user in valid_users}
                 self.accepted_users = set()
                 self.rejected_users = set()
-        
+                # Store problem link for later use
+                self.problem_link = problem["link"]  # Add this line
+
             async def interaction_check(self, interaction):
                 # Only allow challenged users to interact with buttons
                 if interaction.user.id not in self.valid_users:
@@ -452,6 +455,13 @@ class Challenges(commands.Cog):
                         )
         
             async def _start_solve_tracking(self, channel, accepted_members):
+                # Store the challenge in the database with problem link
+                store_challenge(self.challenge_id, self.problem_link)
+                
+                # Store each participant
+                for member in accepted_members:
+                    add_participant(self.challenge_id, member.id)  # member.id is the Discord ID
+
                 # Create a new message with solve tracking view
                 accepted_ids = [m.id for m in accepted_members]
 
@@ -798,12 +808,183 @@ class Challenges(commands.Cog):
         
         await interaction.followup.send(embed=embed)
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(Challenges(bot))
+def initialize_database():
+    """Initialize the database with required tables if they don't exist."""
+    try:
+        print(f"Current working directory: {os.getcwd()}")
+        
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        
+        # Create challenge_participants table if it doesn't exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS challenge_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenge_id INTEGER NOT NULL,
+            user_id INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        ''')
+        
+        # Create challenges table if it doesn't exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenge_id INTEGER UNIQUE NOT NULL,
+            problem_link TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        conn.commit()
+        print("Database initialized successfully")
+        return True
+    except Exception as e:
+        print(f"Error initializing database: {e}")
+        return False
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
-import aiosqlite
-async def check_columns():
-    async with aiosqlite.connect("db/db.db") as db:
-        async with db.execute("PRAGMA table_info(users);") as cursor:
-            async for row in cursor:
-                print(row)
+def store_challenge(challenge_id, problem_link=None):
+    """Store a new challenge in the database."""
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        
+        # Don't insert into challenge_participants here since it requires a non-NULL user_id
+        # Instead, only insert into the challenges table
+        
+        # Store the problem information in the challenges table
+        cursor.execute('SELECT 1 FROM challenges WHERE challenge_id = ? LIMIT 1',
+                     (challenge_id,))
+        if not cursor.fetchone():
+            cursor.execute('''
+            INSERT INTO challenges (challenge_id, problem_link)
+            VALUES (?, ?)
+            ''', (challenge_id, problem_link))
+            
+        conn.commit()
+        print(f"Challenge {challenge_id} stored successfully with problem link: {problem_link}")
+        return True
+    except Exception as e:
+        print(f"Error storing challenge: {e}")
+        return False
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def add_participant(challenge_id, discord_id):
+    """Add a participant to a challenge by looking up their user_id from users table."""
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        
+        # First, get the user_id from the users table using discord_id
+        # Note: Using user_id column, not id
+        cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (discord_id,))
+        user_result = cursor.fetchone()
+        
+        if not user_result:
+            print(f"User with Discord ID {discord_id} not found in users table")
+            conn.close()
+            return False
+            
+        user_id = user_result[0]
+        
+        # Check if this user is already a participant in this challenge
+        cursor.execute('''
+        SELECT 1 FROM challenge_participants 
+        WHERE challenge_id = ? AND user_id = ?
+        ''', (challenge_id, user_id))
+        
+        if not cursor.fetchone():
+            # Insert a new participant record
+            cursor.execute('''
+            INSERT INTO challenge_participants (challenge_id, user_id)
+            VALUES (?, ?)
+            ''', (challenge_id, user_id))
+            
+            conn.commit()
+            print(f"Participant with user_id {user_id} (Discord ID: {discord_id}) added to challenge {challenge_id}")
+            return True
+        else:
+            print(f"User with user_id {user_id} (Discord ID: {discord_id}) is already a participant in challenge {challenge_id}")
+            return False
+    except Exception as e:
+        print(f"Error adding participant: {e}")
+        return False
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def get_challenge_participants(challenge_id):
+    """Get all participants for a specific challenge with their user information."""
+    conn = sqlite3.connect('db/db.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT u.* FROM users u
+    JOIN challenge_participants cp ON u.id = cp.user_id
+    WHERE cp.challenge_id = ?
+    ''', (challenge_id,))
+    
+    participants = cursor.fetchall()
+    conn.close()
+    
+    return participants
+
+def verify_data():
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        
+        # Check challenge_participants table
+        print("Checking challenge_participants table:")
+        cursor.execute('PRAGMA table_info(challenge_participants)')
+        columns = cursor.fetchall()
+        print("Columns:", [col[1] for col in columns])
+        
+        cursor.execute('SELECT challenge_id, user_id FROM challenge_participants')
+        rows = cursor.fetchall()
+        print("Database contents (challenge_participants):")
+        for row in rows:
+            print(f"Challenge ID: {row[0]}, User ID: {row[1]}")
+            
+        # Check challenges table
+        print("\nChecking challenges table:")
+        cursor.execute('PRAGMA table_info(challenges)')
+        columns = cursor.fetchall()
+        print("Columns:", [col[1] for col in columns])
+        
+        cursor.execute('SELECT challenge_id, problem_link FROM challenges')
+        rows = cursor.fetchall()
+        print("Database contents (challenges):")
+        for row in rows:
+            print(f"Challenge ID: {row[0]}, Problem Link: {row[1]}")
+            
+        conn.close()
+    except Exception as e:
+        print(f"Error verifying data: {e}")
+
+def get_challenge_info(challenge_id):
+    """Get information about a challenge."""
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM challenges WHERE challenge_id = ?', (challenge_id,))
+        challenge_info = cursor.fetchone()
+        conn.close()
+        return challenge_info
+    except Exception as e:
+        print(f"Error getting challenge info: {e}")
+        return None
+
+# Add this setup function at the end of the file
+async def setup(bot):
+    # Initialize the database
+    initialize_database()
+    
+    # Add the cog to the bot
+    await bot.add_cog(Challenges(bot))
+    print("Challenges cog loaded and commands registered!")
