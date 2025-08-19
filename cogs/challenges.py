@@ -61,17 +61,29 @@ class Challenges(commands.Cog):
 
             await interaction.response.defer(ephemeral=True)
             handle = self.handle_map.get(str(interaction.user.id))
-            
-            # If handle is missing, we can't check.
             if not handle:
                 await interaction.followup.send("❌ Your Codeforces handle is not linked. I cannot check your solution.", ephemeral=True)
                 return
 
             solved = await self.check_if_solved(handle)
-
             if solved:
                 self.finished.add(interaction.user.id)
-                await interaction.followup.send("✅ Congratulations! Your solution is correct. Recording your score...", ephemeral=True)
+
+                # Check if a winner already exists
+                import sqlite3
+                conn = sqlite3.connect('db/db.db')
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM challenge_participants WHERE challenge_id = ? AND is_winner = 1",
+                    (self.challenge_id,)
+                )
+                winner_exists = cursor.fetchone()
+                conn.close()
+
+                if not winner_exists:
+                    await interaction.followup.send("✅ Congratulations! You solved the problem and was the first you are the winner! 🎈🎉", ephemeral=True)
+                else:
+                    await interaction.followup.send("✅ You solved the problem, but you did not win 🥺. try challenging your buddies again", ephemeral=True)
 
                 # --- Corrected Winner and Scoring Logic ---
                 conn = None
@@ -238,7 +250,7 @@ class Challenges(commands.Cog):
             owner2_name = owner2_member.display_name if owner2_member else str(OWNER2_ID)
 
             embed.set_footer(
-                text=f"If you are facing any bug dm us {owner1_name}, {owner2_name}"
+                text=f"If you are facing any bug dm us   `{owner1_name}`, `{owner2_name}`"
             )
 
             await interaction.channel.send(embed=embed)
