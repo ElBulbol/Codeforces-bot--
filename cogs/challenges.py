@@ -182,12 +182,12 @@ class Challenges(commands.Cog):
                     )
                     await db.commit()
                     print(f"Added {points} points to user {user_id} (overall, daily, weekly, monthly)")
-                await interaction.followup.send("✅ Congratulations! You've solved the problem!", ephemeral=True)
+                await interaction.followup.send("✅👏 Congratulations! You've solved the problem!", ephemeral=True)
                 # Only update status if all are done
                 if self.finished.union(self.surrendered) == self.participants:
                     await self._update_status(interaction)
             else:
-                await interaction.followup.send("❌ You haven't solved this problem yet.", ephemeral=True)
+                await interaction.followup.send("❌😠 You haven't solved this problem yet.", ephemeral=True)
         
         @discord.ui.button(label="Surrender", style=discord.ButtonStyle.danger)
         async def surrender(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -201,7 +201,7 @@ class Challenges(commands.Cog):
             if interaction.user.id in self.finished:
                 self.finished.remove(interaction.user.id)
             
-            await interaction.followup.send("You have surrendered this challenge.", ephemeral=True)
+            await interaction.followup.send("You have surrendered this challenge 😢💔.", ephemeral=True)
             # Only update status if all are done
             if self.finished.union(self.surrendered) == self.participants:
                 await self._update_status(interaction)
@@ -210,55 +210,86 @@ class Challenges(commands.Cog):
             import sqlite3
 
             embed = discord.Embed(
-                title="Challenge Status Update",
-                description=f"Challenge ID: {self.challenge_id}",
-                color=discord.Color.blue()
+                title="🏁 Challenge Status Update",
+                description=f"**Challenge ID:** `{self.challenge_id}`\n\n",
+                color=discord.Color.purple()
             )
 
-            # Query the database for winners and losers
             conn = sqlite3.connect('db/db.db')
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT user_id, is_winner FROM challenge_participants WHERE challenge_id = ?",
+                "SELECT user_id, is_winner, score_awarded FROM challenge_participants WHERE challenge_id = ?",
                 (self.challenge_id,)
             )
             rows = cursor.fetchall()
-            conn.close()
 
             winners = []
             losers = []
-            for user_id, is_winner in rows:
-                # Get Discord member object
-                member = interaction.guild.get_member(user_id)
-                name = member.display_name if member else f"User {user_id}"
-                handle = self.handle_map.get(str(user_id), "Unknown")
-                entry = f"{name} ({handle})"
+            for user_id, is_winner, score_awarded in rows:
+                # Fetch discord_id for mention
+                cursor.execute("SELECT discord_id FROM users WHERE user_id = ?", (user_id,))
+                result = cursor.fetchone()
+                if result:
+                    discord_id = result[0]
+                    mention = f"<@{discord_id}>"
+                else:
+                    mention = f"User {user_id}"
+                handle = self.handle_map.get(str(user_id))
+                points_text = f"**{score_awarded or 0} pts**"
+                if handle and handle != "None":
+                    entry = f"{mention} • `{handle}` • {points_text}"
+                else:
+                    entry = f"{mention} • {points_text}"
                 if is_winner == 1:
                     winners.append(entry)
                 else:
                     losers.append(entry)
+            conn.close()
 
+            # Add winners field
             if winners:
                 embed.add_field(
                     name="🏆 Winner(s)",
-                    value=", ".join(winners),
+                    value="\n".join(winners),
                     inline=False
                 )
+            else:
+                embed.add_field(
+                    name="🏆 Winner(s)",
+                    value="No winners this time.",
+                    inline=False
+                )
+
+            # Add losers field
             if losers:
                 embed.add_field(
                     name="❌ Loser(s)",
-                    value=", ".join(losers),
+                    value="\n".join(losers),
                     inline=False
                 )
-
-            # If everyone has finished or surrendered, show completion message
-            if self.finished.union(self.surrendered) == self.participants:
+            else:
                 embed.add_field(
-                    name="Challenge Complete",
-                    value="All participants have completed or surrendered the challenge.",
+                    name="❌ Loser(s)",
+                    value="No losers! Everyone solved the challenge!",
                     inline=False
                 )
 
+            # Add summary and completion
+            embed.add_field(
+                name="📊 Challenge Summary",
+                value=f"Total Participants: **{len(winners) + len(losers)}**\n"
+                      f"Winners: **{len(winners)}**\n"
+                      f"Losers: **{len(losers)}**",
+                inline=False
+            )
+
+            embed.add_field(
+                name="✅ Challenge Complete",
+                value="All participants have completed or surrendered the challenge.",
+                inline=False
+            )
+
+            embed.set_footer(text="Thank you for participating! 🚀")
             await interaction.channel.send(embed=embed)
     
     # Challenge command - keep your existing implementation
