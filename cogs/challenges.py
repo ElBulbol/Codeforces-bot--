@@ -164,11 +164,14 @@ class Challenges(commands.Cog):
                     try:
                         conn = sqlite3.connect('db/db.db')
                         cursor = conn.cursor()
-                        cursor.execute('SELECT user_id FROM challenge_participants WHERE challenge_id = ? AND is_winner = 1',
-                                     (self.challenge_id,))
+                        cursor.execute(
+                            "SELECT user_id FROM challenge_participants WHERE challenge_id = ? AND is_winner = 1",
+                            (self.challenge_id,)
+                        )
                         winner_exists = cursor.fetchone()
 
-                        cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (int(user_id),))
+                        discord_id = interaction.user.id
+                        cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (discord_id,))
                         result = cursor.fetchone()
                         internal_user_id = result[0] if result else None
 
@@ -181,6 +184,15 @@ class Challenges(commands.Cog):
                             ''', (self.challenge_id, internal_user_id))
                             conn.commit()
                             print(f"User {internal_user_id} marked as winner for challenge {self.challenge_id}")
+                        else:
+                            # Winner already exists, do not set is_winner for this user
+                            cursor.execute('''
+                                UPDATE challenge_participants
+                                SET is_winner = NULL
+                                WHERE challenge_id = ? AND user_id = ?
+                            ''', (self.challenge_id, internal_user_id))
+                            conn.commit()
+                            print(f"User {internal_user_id} unmarked as winner for challenge {self.challenge_id} (another user solved first)")
                         conn.close()
                     except Exception as e:
                         print(f"Error updating winner: {e}")
@@ -987,33 +999,32 @@ def add_participant(challenge_id, discord_id):
         # First, get the user_id from the users table using discord_id
         # Note: Using user_id column, not id
         cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (discord_id,))
-        user_result = cursor.fetchone()
-        
-        if not user_result:
+        result = cursor.fetchone()
+        internal_user_id = result[0] if result else None
+
+        if not internal_user_id:
             print(f"User with Discord ID {discord_id} not found in users table")
             conn.close()
             return False
             
-        user_id = user_result[0]
-        
         # Check if this user is already a participant in this challenge
         cursor.execute('''
         SELECT 1 FROM challenge_participants 
         WHERE challenge_id = ? AND user_id = ?
-        ''', (challenge_id, user_id))
+        ''', (challenge_id, internal_user_id))
         
         if not cursor.fetchone():
             # Insert a new participant record
             cursor.execute('''
             INSERT INTO challenge_participants (challenge_id, user_id)
             VALUES (?, ?)
-            ''', (challenge_id, user_id))
+            ''', (challenge_id, internal_user_id))
             
             conn.commit()
-            print(f"Participant with user_id {user_id} (Discord ID: {discord_id}) added to challenge {challenge_id}")
+            print(f"Participant with user_id {internal_user_id} (Discord ID: {discord_id}) added to challenge {challenge_id}")
             return True
         else:
-            print(f"User with user_id {user_id} (Discord ID: {discord_id}) is already a participant in challenge {challenge_id}")
+            print(f"User with user_id {internal_user_id} (Discord ID: {discord_id}) is already a participant in challenge {challenge_id}")
             return False
     except Exception as e:
         print(f"Error adding participant: {e}")
