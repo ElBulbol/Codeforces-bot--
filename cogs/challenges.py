@@ -183,28 +183,9 @@ class Challenges(commands.Cog):
                     await db.commit()
                     print(f"Added {points} points to user {user_id} (overall, daily, weekly, monthly)")
                 await interaction.followup.send("✅ Congratulations! You've solved the problem!", ephemeral=True)
-                
-                # Calculate points using your equation
-                score_points = rate / 100  # Or use your points variable if you want
-
-                # Get the internal user_id from the users table using discord_id
-                try:
-                    conn = sqlite3.connect('db/db.db')
-                    cursor = conn.cursor()
-                    cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (int(user_id),))
-                    result = cursor.fetchone()
-                    conn.close()
-                    if result:
-                        internal_user_id = result[0]
-                        # Call your scoring function
-                        update_user_scores(internal_user_id, points, rate)
-                    else:
-                        print(f"User with discord_id {user_id} not found in users table.")
-                except Exception as e:
-                    print(f"Error updating user scores: {e}")
-                
-                # Update the message to reflect the current status
-                await self._update_status(interaction)
+                # Only update status if all are done
+                if self.finished.union(self.surrendered) == self.participants:
+                    await self._update_status(interaction)
             else:
                 await interaction.followup.send("❌ You haven't solved this problem yet.", ephemeral=True)
         
@@ -221,64 +202,64 @@ class Challenges(commands.Cog):
                 self.finished.remove(interaction.user.id)
             
             await interaction.followup.send("You have surrendered this challenge.", ephemeral=True)
-            
-            # Update the message to reflect the current status
-            await self._update_status(interaction)
+            # Only update status if all are done
+            if self.finished.union(self.surrendered) == self.participants:
+                await self._update_status(interaction)
         
         async def _update_status(self, interaction):
-            # Create an updated embed
+            import sqlite3
+
             embed = discord.Embed(
                 title="Challenge Status Update",
                 description=f"Challenge ID: {self.challenge_id}",
                 color=discord.Color.blue()
             )
-            
-            # Format the completed users
-            if self.finished:
-                finished_names = []
-                for user_id in self.finished:
-                    member = interaction.guild.get_member(user_id)
-                    name = member.display_name if member else f"User {user_id}"
-                    handle = self.handle_map.get(str(user_id), "Unknown")
-                    finished_names.append(f"{name} ({handle})")
-                
+
+            # Query the database for winners and losers
+            conn = sqlite3.connect('db/db.db')
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_id, is_winner FROM challenge_participants WHERE challenge_id = ?",
+                (self.challenge_id,)
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            winners = []
+            losers = []
+            for user_id, is_winner in rows:
+                # Get Discord member object
+                member = interaction.guild.get_member(user_id)
+                name = member.display_name if member else f"User {user_id}"
+                handle = self.handle_map.get(str(user_id), "Unknown")
+                entry = f"{name} ({handle})"
+                if is_winner == 1:
+                    winners.append(entry)
+                else:
+                    losers.append(entry)
+
+            if winners:
                 embed.add_field(
-                    name="Completed",
-                    value=", ".join(finished_names),
+                    name="🏆 Winner(s)",
+                    value=", ".join(winners),
                     inline=False
                 )
-            
-            # Format the surrendered users
-            if self.surrendered:
-                surrender_names = []
-                for user_id in self.surrendered:
-                    member = interaction.guild.get_member(user_id)
-                    name = member.display_name if member else f"User {user_id}"
-                    handle = self.handle_map.get(str(user_id), "Unknown")
-                    surrender_names.append(f"{name} ({handle})")
-                
+            if losers:
                 embed.add_field(
-                    name="Surrendered",
-                    value=", ".join(surrender_names),
+                    name="❌ Loser(s)",
+                    value=", ".join(losers),
                     inline=False
                 )
-                
+
             # If everyone has finished or surrendered, show completion message
             if self.finished.union(self.surrendered) == self.participants:
-                if self.surrendered:
-                    embed.add_field(
-                        name="Challenge Complete",
-                        value="All participants have completed or surrendered the challenge.",
-                        inline=False
-                    )
-                else:
-                    embed.add_field(
-                        name="Challenge Complete",
-                        value="🎉 All participants have successfully solved the problem!",
-                        inline=False
-                    )
-                
-                await interaction.channel.send(embed=embed)
+                embed.add_field(
+                    name="Challenge Complete",
+                    value="All participants have completed or surrendered the challenge.",
+                    inline=False
+                )
+
+            await interaction.channel.send(embed=embed)
     
     # Challenge command - keep your existing implementation
     @app_commands.command(
