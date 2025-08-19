@@ -20,6 +20,7 @@ from utility.recording_score import update_user_score_in_challenge_participants
 import sqlite3
 import os
 
+
 def _parse_contest_and_index_from_link(link: str) -> Optional[Dict[str, str]]:
     # Expected: https://codeforces.com/contest/{contestId}/problem/{index}
     m = re.search(r"/contest/(\d+)/problem/([A-Za-z0-9]+)", link)
@@ -210,7 +211,7 @@ class Challenges(commands.Cog):
             import sqlite3
 
             embed = discord.Embed(
-                title="🏁 Challenge Status Update",
+                title=f"🏁 Challenge result",
                 description=f"**Challenge ID:** `{self.challenge_id}`\n\n",
                 color=discord.Color.purple()
             )
@@ -289,7 +290,20 @@ class Challenges(commands.Cog):
                 inline=False
             )
 
-            embed.set_footer(text="Thank you for participating! 🚀")
+            # Store your Discord IDs as variables
+            OWNER1_ID = 585540481937833984
+            OWNER2_ID = 543172445155098624
+
+            # Get member display names
+            owner1_member = interaction.guild.get_member(OWNER1_ID)
+            owner2_member = interaction.guild.get_member(OWNER2_ID)
+            owner1_name = owner1_member.display_name if owner1_member else str(OWNER1_ID)
+            owner2_name = owner2_member.display_name if owner2_member else str(OWNER2_ID)
+
+            embed.set_footer(
+                text=f"If you are facing any bug dm us {owner1_name}, {owner2_name}"
+            )
+
             await interaction.channel.send(embed=embed)
     
     # Challenge command - keep your existing implementation
