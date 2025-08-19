@@ -16,6 +16,7 @@ from utility.db_helpers import (
     get_all_cf_handles,
     increment_user_solved_count
 )
+from utility.recording_score import update_user_scores
 import sqlite3
 import os
 
@@ -139,10 +140,7 @@ class Challenges(commands.Cog):
                 first_accept = problem_id not in user_solves
 
                 # Calculate points
-                if first_accept:
-                    points = ((rate / rate) + 3) if rate else 3
-                else:
-                    points = (rate / 100) if rate else 8
+                points = rate / 100
 
                 # Update solves_info for first accept
                 if first_accept:
@@ -157,12 +155,31 @@ class Challenges(commands.Cog):
                 import aiosqlite
                 async with aiosqlite.connect("db/db.db") as db:
                     await db.execute(
-        "UPDATE users SET overall_score = overall_score + ?, daily_score = daily_score + ?, weekly_score = weekly_score + ?, monthly_score = monthly_score + ? WHERE discord_id = ?",
-        (points, points, points, points, user_id)
-    )
+                        "UPDATE users SET overall_score = overall_score + ?, daily_score = daily_score + ?, weekly_score = monthly_score + ?, monthly_score = monthly_score + ? WHERE discord_id = ?",
+                        (points, points, points, points, user_id)
+                    )
                     await db.commit()
                     print(f"Added {points} points to user {user_id} (overall, daily, weekly, monthly)")
                 await interaction.followup.send("✅ Congratulations! You've solved the problem!", ephemeral=True)
+                
+                # Calculate points using your equation
+                score_points = rate / 100  # Or use your points variable if you want
+
+                # Get the internal user_id from the users table using discord_id
+                try:
+                    conn = sqlite3.connect('db/db.db')
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (int(user_id),))
+                    result = cursor.fetchone()
+                    conn.close()
+                    if result:
+                        internal_user_id = result[0]
+                        # Call your scoring function
+                        update_user_scores(internal_user_id, points, rate)
+                    else:
+                        print(f"User with discord_id {user_id} not found in users table.")
+                except Exception as e:
+                    print(f"Error updating user scores: {e}")
                 
                 # Update the message to reflect the current status
                 await self._update_status(interaction)
@@ -249,13 +266,21 @@ class Challenges(commands.Cog):
     @app_commands.describe(
         members="Comma-separated list of mentions or IDs to challenge",
         tags="Problem tags (e.g., 'dp,graphs') or 'random'",
-        rating="Problem rating (e.g., '800') or 'random'"
+        rating="Problem rating (e.g., '800') or 'random'",
+        link="(Optional) Link to a specific Codeforces problem"
     )
-    async def challenge(self, interaction: discord.Interaction, members: str, tags: str = "random", rating: str = "random"):
-        """Challenge users to solve a Codeforces problem"""
+    async def challenge(
+        self,
+        interaction: discord.Interaction,
+        members: str,
+        tags: str = "random",
+        rating: str = "random",
+        link: str = None
+    ):
+        """Challenge users to solve a Codeforces problem or a specific problem link"""
         print("Challenge command called!")
         await interaction.response.defer()
-        
+
         # Parse mentions (supports comma-separated, space-separated, or both)
         user_ids = set()
         for segment in members.replace(',', ' ').split():
@@ -305,13 +330,29 @@ class Challenges(commands.Cog):
                 ephemeral=True
             )
     
-        # Get problem based on rating and tags
-        session = getattr(self.bot, "session", None)
-        if session is None:
-            async with aiohttp.ClientSession() as tmp_session:
-                problem = await get_random_problem(tmp_session, type_of_problem=tags, rating=rating)
+        # Get problem based on link, or rating and tags
+        if link:
+            # Parse contestId and index from the link
+            parsed = _parse_contest_and_index_from_link(link)
+            if not parsed:
+                await interaction.followup.send(
+                    "Invalid problem link format. Please use a valid Codeforces problem link.",
+                    ephemeral=True
+                )
+                return
+            problem = {
+                "name": f"Contest {parsed['contestId']} Problem {parsed['index']}",
+                "link": link,
+                "rating": rating if rating != "random" else "Unknown",
+                "tags": tags.split(",") if tags != "random" else []
+            }
         else:
-            problem = await get_random_problem(session, type_of_problem=tags, rating=rating)
+            session = getattr(self.bot, "session", None)
+            if session is None:
+                async with aiohttp.ClientSession() as tmp_session:
+                    problem = await get_random_problem(tmp_session, type_of_problem=tags, rating=rating)
+            else:
+                problem = await get_random_problem(session, type_of_problem=tags, rating=rating)
     
         if not problem:
             await interaction.followup.send(
