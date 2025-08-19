@@ -2,6 +2,7 @@ import aiosqlite
 import os
 import json
 from typing import Dict, List, Optional
+import time
 
 
 # Global database path
@@ -130,10 +131,9 @@ async def get_user_by_discord(discord_id: str) -> Optional[Dict]:
 async def create_challenge(problem_link: str) -> int:
     """Create a new challenge and return the challenge_id."""
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "INSERT INTO challenges (problem_link) VALUES (?)",
-            (problem_link,)
+            "INSERT INTO challenges (problem_link, created_at) VALUES (?, ?)",
+            (problem_link, int(time.time()))
         )
         await db.commit()
         return cursor.lastrowid
@@ -145,12 +145,10 @@ async def add_challenge_participant(
     score_awarded: int = 0, 
     is_winner: bool = False
 ) -> None:
-    """Add a participant to a challenge."""
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
         await db.execute(
             "INSERT INTO challenge_participants (challenge_id, user_id, score_awarded, is_winner) VALUES (?, ?, ?, ?)",
-            (challenge_id, user_id, score_awarded, is_winner)
+            (challenge_id, user_id, score_awarded, int(is_winner))
         )
         await db.commit()
 
