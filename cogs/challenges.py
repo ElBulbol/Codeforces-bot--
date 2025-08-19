@@ -414,11 +414,32 @@ class Challenges(commands.Cog):
                     ephemeral=True
                 )
                 return
+
+            contest_id = parsed['contestId']
+            index = parsed['index']
+            problem_name = None
+            problem_rating = "Unknown"
+            problem_tags = []
+
+            async with aiohttp.ClientSession() as session:
+                url = f"https://codeforces.com/api/problemset.problems"
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                if data.get("status") == "OK":
+                    for p in data["result"]["problems"]:
+                        if p.get("contestId") == contest_id and p.get("index") == index:
+                            problem_name = p.get("name", f"Contest {contest_id} Problem {index}")
+                            problem_rating = p.get("rating", "Unknown")
+                            problem_tags = p.get("tags", [])
+                            break
+                if not problem_name:
+                    problem_name = f"Contest {contest_id} Problem {index}"
+
             problem = {
-                "name": f"Contest {parsed['contestId']} Problem {parsed['index']}",
+                "name": problem_name,
                 "link": link,
-                "rating": rating if rating != "random" else "Unknown",
-                "tags": tags.split(",") if tags != "random" else []
+                "rating": problem_rating,
+                "tags": problem_tags
             }
         else:
             session = getattr(self.bot, "session", None)
@@ -641,9 +662,10 @@ class Challenges(commands.Cog):
     
         # Create the initial embed
         embed = discord.Embed(
-            title=f"Codeforces Challenge: {problem['name']}",
-            url=problem['link'],
-            description=f"Rating: {problem['rating']}\nTags: {', '.join(problem['tags'])}",
+            title="Codeforces Challenge",
+            description=f"[{problem['name']}]({problem['link']})\n"
+                        f"Rating: {problem['rating']}\n"
+                        f"Tags: {', '.join(problem['tags']) if problem['tags'] else 'None'}",
             color=discord.Color.blue()
         )
     
