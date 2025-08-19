@@ -27,6 +27,27 @@ def update_user_scores(user_id: int, points: float):
         if 'conn' in locals():
             conn.close()
 
+def update_user_score_in_challenge_participants(challenge_id: int, user_id: int, rating: int):
+    """
+    Adds (rating / 100) to score_awarded for the user in challenge_participants table.
+    """
+    score_awarded = rating / 100
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE challenge_participants
+            SET score_awarded = COALESCE(score_awarded, 0) + ?
+            WHERE challenge_id = ? AND user_id = ?
+        ''', (score_awarded, challenge_id, user_id))
+        conn.commit()
+        print(f"Updated score_awarded for user_id {user_id} in challenge_id {challenge_id} (+{score_awarded})")
+    except Exception as e:
+        print(f"Error updating score_awarded: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
 if __name__ == "__main__":
     # Replace with a valid user_id from your database
     test_user_id = 1

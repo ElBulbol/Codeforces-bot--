@@ -16,7 +16,7 @@ from utility.db_helpers import (
     get_all_cf_handles,
     increment_user_solved_count
 )
-from utility.recording_score import update_user_scores
+from utility.recording_score import update_user_score_in_challenge_participants
 import sqlite3
 import os
 
@@ -150,6 +150,28 @@ class Challenges(commands.Cog):
                         solves_info[user_id] = []
                     solves_info[user_id].append(problem_id)
                     await update_contest_solves_info(self.contest_id, solves_info)
+
+                    # Mark this user as winner in challenge_participants table
+                    try:
+                        conn = sqlite3.connect('db/db.db')
+                        cursor = conn.cursor()
+                        cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (int(user_id),))
+                        result = cursor.fetchone()
+                        if result:
+                            internal_user_id = result[0]
+                            cursor.execute('''
+                                UPDATE challenge_participants
+                                SET is_winner = 1
+                                WHERE challenge_id = ? AND user_id = ?
+                            ''', (self.challenge_id, internal_user_id))
+                            conn.commit()
+                            print(f"User {internal_user_id} marked as winner for challenge {self.challenge_id}")
+                        conn.close()
+                    except Exception as e:
+                        print(f"Error updating winner: {e}")
+
+                # Update score_awarded for this user
+                update_user_score_in_challenge_participants(self.challenge_id, internal_user_id, rate)
 
                 # Update scores in users table
                 import aiosqlite
@@ -863,6 +885,7 @@ def initialize_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             challenge_id INTEGER NOT NULL,
             user_id INTEGER,
+            is_winner INTEGER DEFAULT 0,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
         ''')
