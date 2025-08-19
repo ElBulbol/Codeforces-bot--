@@ -80,7 +80,15 @@ class Challenges(commands.Cog):
             if interaction.user.id not in self.participants:
                 await interaction.response.send_message("You are not part of this challenge.", ephemeral=True)
                 return
-            
+
+            # Prevent multiple solves or surrender attempts
+            if interaction.user.id in self.finished:
+                await interaction.response.send_message("You have already solved this problem and cannot submit again.", ephemeral=True)
+                return
+            if interaction.user.id in self.surrendered:
+                await interaction.response.send_message("You have already surrendered and cannot submit again.", ephemeral=True)
+                return
+
             await interaction.response.defer(ephemeral=True)
             
             # Get user's CF handle
@@ -156,10 +164,16 @@ class Challenges(commands.Cog):
                     try:
                         conn = sqlite3.connect('db/db.db')
                         cursor = conn.cursor()
+                        cursor.execute('SELECT user_id FROM challenge_participants WHERE challenge_id = ? AND is_winner = 1',
+                                     (self.challenge_id,))
+                        winner_exists = cursor.fetchone()
+
                         cursor.execute('SELECT user_id FROM users WHERE discord_id = ?', (int(user_id),))
                         result = cursor.fetchone()
-                        if result:
-                            internal_user_id = result[0]
+                        internal_user_id = result[0] if result else None
+
+                        if not winner_exists and internal_user_id:
+                            # No winner yet, set this user as winner
                             cursor.execute('''
                                 UPDATE challenge_participants
                                 SET is_winner = 1
