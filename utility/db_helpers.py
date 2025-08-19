@@ -3,6 +3,7 @@ import os
 import json
 from typing import Dict, List, Optional
 import time
+import sqlite3
 
 
 # Global database path
@@ -915,3 +916,39 @@ async def migrate_challenges_table() -> None:
         await db.execute("DROP TABLE challenges_old")
         
         await db.commit()
+
+def store_challenge(challenge_id, problem_link):
+    """Stores a new challenge in the 'challenges' table."""
+    conn = None
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO challenges (challenge_id, problem_link, created_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        ''', (challenge_id, problem_link))
+        conn.commit()
+        print(f"Successfully stored challenge {challenge_id}.")
+    except sqlite3.Error as e:
+        print(f"Database error in store_challenge: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def add_participant(challenge_id, user_id):
+    """Adds a participant to a specific challenge in the 'challenge_participants' table."""
+    conn = None
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO challenge_participants (challenge_id, user_id)
+            VALUES (?, ?)
+        ''', (challenge_id, user_id))
+        conn.commit()
+        print(f"Successfully added user {user_id} to challenge {challenge_id}.")
+    except sqlite3.Error as e:
+        print(f"Database error in add_participant: {e}")
+    finally:
+        if conn:
+            conn.close()
