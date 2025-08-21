@@ -425,28 +425,29 @@ class ContestBuilderView(discord.ui.View):
             else:
                 start_time_dt = datetime.fromisoformat(contest_data['start_time'])
                 starts_at_text = start_time_dt.strftime('%d/%m/%Y %H:%M')
-            
+
             embed = discord.Embed(
                 title=f"📢 New Contest: {contest_data['name']}",
-                description=f"A new contest has been scheduled!\n\n"
-                            f"**Starts at:** {starts_at_text}\n"
-                            f"**Duration:** {contest_data['duration']} minutes\n"
-                            f"**Problems:** {len(contest_data.get('problems', []))}\n"
-                            f"**Participants:** {participant_count}",
-                color=discord.Color.blue()
+                description="A new coding challenge has been scheduled! Sharpen your skills and compete 🚀",
+                color=discord.Color.gold()
             )
-            embed.set_footer(text=f"Contest ID: {contest_id}")
-            
+
+            embed.add_field(name="🕒 Starts At", value=starts_at_text, inline=True)
+            embed.add_field(name="⏳ Duration", value=f"{contest_data['duration']} mins", inline=True)
+            embed.add_field(name="📘 Problems", value=f"{len(contest_data.get('problems', []))}", inline=True)
+
+            embed.set_footer(text=f"Contest ID: {contest_id} • May the best coder win! 💡")
+
             view = discord.ui.View(timeout=None)
             view.add_item(discord.ui.Button(
-                label="Join Contest", 
+                label="🔥 Join Contest", 
                 style=discord.ButtonStyle.success, 
                 custom_id=f"join_{contest_id}"
             ))
-            
+
             await announcement_channel.send(
-                content=f"{participant_role.mention if participant_role else 'Participants'}", 
-                embed=embed, 
+                content=f"{participant_role.mention if participant_role else 'Participants'}",
+                embed=embed,
                 view=view
             )
         except Exception as e:

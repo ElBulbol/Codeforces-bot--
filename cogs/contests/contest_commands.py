@@ -76,41 +76,19 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         contest_data = await get_bot_contest(contest_id)
         duration = contest_data['duration']
 
-        # Normalize to unix timestamps so we always compute minutes:seconds from unix_end
         now_unix = int(datetime.now().timestamp())
         unix_start = contest_data.get('unix_timestamp')
         if not unix_start:
-            # Try to derive unix_start from ISO start_time if available
             try:
                 start_dt = datetime.fromisoformat(contest_data.get('start_time'))
                 unix_start = int(start_dt.timestamp())
             except Exception:
-                # If no valid start time, assume starts now
                 unix_start = now_unix
 
         unix_end = unix_start + int(duration) * 60
 
-        # Compute remaining time in seconds (non-negative)
-        time_left_seconds = max(unix_end - now_unix, 0)
-        minutes_left = time_left_seconds // 60
-        seconds_left = time_left_seconds % 60
-
-        # Format MM:SS (minutes may be more than 2 digits)
-        mmss = f"{minutes_left}:{seconds_left:02d}"
-
-        # Format time left as Discord relative timestamp
-        time_left_text = f"<t:{unix_end}:R>"
-
-        # Create embed showing only relative time left (uses unix_end)
-        embed = discord.Embed(
-            title=f"🏆 Contest Started: {contest_name}",
-            description="Get ready to solve problems and climb the leaderboard!",
-            color=discord.Color.blurple()
-        )
-
-        # Prepare unix timestamps for Discord formatting
-        starts_at_text = f"<t:{unix_start}:R>"  # Relative start time (e.g., "in 5 minutes")
-        countdown_text = f"<t:{unix_end}:R>"    # Relative end time (e.g., "in 2 hours")
+        starts_at_text = f"<t:{unix_start}:R>"
+        countdown_text = f"<t:{unix_end}:R>"
 
         embed = discord.Embed(
             title=f"🏆 Contest Started: {contest_name}",
@@ -130,7 +108,6 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             inline=True
         )
 
-        # Build a clean numbered problem list
         problem_list = ""
         for i, problem in enumerate(problems, start=1):
             if isinstance(problem, dict):
@@ -149,7 +126,6 @@ class ContestCommands(commands.GroupCog, name = "contest"):
 
         embed.set_footer(text=f"Contest ID: {contest_id} • Good luck! 🚀")
 
-        # Buttons
         view = discord.ui.View(timeout=None)
         for i in range(len(problems)):
             view.add_item(discord.ui.Button(
@@ -168,11 +144,9 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         )
         print(f"Started contest {contest_id}")
 
-        # store message and start countdown task for this contest
         self.active_contests[contest_id]['message'] = message
         self.active_contests[contest_id]['unix_end'] = unix_end
 
-        # start background countdown task (edits the message every second)
         task = asyncio.create_task(self._countdown_task(contest_id, message, unix_end, contest_name, problems))
         self.active_contests[contest_id]['countdown_task'] = task
 
@@ -199,11 +173,12 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             
             if results:
                 embed = discord.Embed(
-                    title=f"🏆 Final Results: {contest_name}",
-                    description=f"📌 Contest ID: `{contest_id}`",
+                    title=f"🏆 **FINAL RESULTS**: {contest_name.upper()}",
+                    description=f"**📌 Contest ID:** `{contest_id}`\n\n",
                     color=discord.Color.gold()
                 )
-                
+                embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/1828/1828884.png")  # Trophy icon
+
                 # Build leaderboard text
                 top3_text = ""
                 others_text = ""
@@ -218,20 +193,20 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                     # Top 3 with medals
                     if rank == 1:
                         medal = "🥇"
-                        top3_text += f"{medal} {user_mention} ({handle}) — **{score} pts**\n"
+                        top3_text += f"**{medal} {user_mention} ({handle}) — {score} pts**\n"
                     elif rank == 2:
                         medal = "🥈"
-                        top3_text += f"{medal} {user_mention} ({handle}) — **{score} pts**\n"
+                        top3_text += f"**{medal} {user_mention} ({handle}) — {score} pts**\n"
                     elif rank == 3:
                         medal = "🥉"
-                        top3_text += f"{medal} {user_mention} ({handle}) — **{score} pts**\n"
+                        top3_text += f"**{medal} {user_mention} ({handle}) — {score} pts**\n"
                     else:
                         others_text += f"`#{rank}` {user_mention} ({handle}) — {score} pts\n"
 
                 if top3_text:
-                    embed.add_field(name="👑 Top 3", value=top3_text, inline=False)
+                    embed.add_field(name="👑 **Top 3**", value=top3_text, inline=False)
                 if others_text:
-                    embed.add_field(name="📊 Other Participants", value=others_text, inline=False)
+                    embed.add_field(name="📊 **Other Participants**", value=others_text, inline=False)
 
                 # Highlight winner separately
                 if len(results) > 0:
@@ -239,8 +214,8 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                     winner_user = self.bot.get_user(int(winner['discord_id']))
                     winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
                     embed.add_field(
-                        name="🎉 Champion",
-                        value=f"All hail {winner_mention} with **{winner['score']} pts**!",
+                        name="🎉 **CHAMPION**",
+                        value=f"🏅 **All hail {winner_mention} with {winner['score']} pts!**",
                         inline=False
                     )
 
@@ -559,3 +534,6 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         if not problem_name:
             problem_name = f"Problem {problem_letter}"
         await update_contest_problems(contest_id, [{"link": problem_link, "name": problem_name}])        # (Assuming you have a function to do this, e.g., update_contest_problems_with_name)        # Store both link and name in your contest's problems list            problem_name = f"Problem {problem_letter}"    await bot.add_cog(ContestCommands(bot))
+
+async def setup(bot):
+    await bot.add_cog(ContestCommands(bot))
