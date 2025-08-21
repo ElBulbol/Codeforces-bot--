@@ -150,6 +150,24 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         task = asyncio.create_task(self._countdown_task(contest_id, message, unix_end, contest_name, problems))
         self.active_contests[contest_id]['countdown_task'] = task
 
+        # Get contest data
+        contest_data = await get_bot_contest(contest_id)
+
+        # Create a dummy interaction object if needed (for legacy calls)
+        # If you have access to the original interaction, pass it instead!
+        class DummyInteraction:
+            def __init__(self, bot, guild):
+                self.client = bot
+                self.guild = guild
+
+        # Get the guild object (from channel)
+        guild = channel.guild if channel else None
+        interaction = DummyInteraction(self.bot, guild)
+
+        # Use ContestBuilderView to send the announcement
+        builder_view = ContestBuilderView("unused_interaction_id")  # interaction_id not needed for announcement
+        await builder_view._send_announcement(interaction, contest_data, contest_id)
+
     async def end_contest(self, contest_id, contest_name):
         # Update status in DB
         await update_contest_status(contest_id, 'ENDED')

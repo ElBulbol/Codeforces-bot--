@@ -11,6 +11,7 @@ from utility.db_helpers import (
     increment_user_solved_count
 )
 from utility.recording_score import update_contest_score
+from .contest_builder import ContestBuilderView, contest_builder
 
 class ContestInteractionHandler:
     """Handles contest-related interactions like join and check solved buttons"""

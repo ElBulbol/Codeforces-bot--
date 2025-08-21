@@ -426,9 +426,23 @@ class ContestBuilderView(discord.ui.View):
                 start_time_dt = datetime.fromisoformat(contest_data['start_time'])
                 starts_at_text = start_time_dt.strftime('%d/%m/%Y %H:%M')
 
+            # Fetch start_time from contest_data (which should come from your DB)
+            start_time_str = contest_data.get('start_time')  # ISO format string from DB
+            if start_time_str:
+                try:
+                    start_time_dt = datetime.fromisoformat(start_time_str)
+                    started_at_text = start_time_dt.strftime("%d/%m/%Y %H:%M")
+                except Exception:
+                    started_at_text = start_time_str
+            else:
+                started_at_text = "Unknown"
+
             embed = discord.Embed(
                 title=f"📢 New Contest: {contest_data['name']}",
-                description="A new coding challenge has been scheduled! Sharpen your skills and compete 🚀",
+                description=(
+                    "A new coding challenge has been scheduled! Sharpen your skills and compete 🚀\n\n"
+                    f"**Contest Started At:** `{started_at_text}`"
+                ),
                 color=discord.Color.gold()
             )
 
