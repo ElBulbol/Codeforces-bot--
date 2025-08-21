@@ -48,6 +48,83 @@ def update_user_score_in_challenge_participants(challenge_id: int, user_id: int,
         if 'conn' in locals():
             conn.close()
 
+def update_contest_score(contest_id: int, user_id: int, problem_link: str):
+    """
+    Updates the score for a user in contest_participants and contest_scores tables.
+    If the problem_link is not solved by anyone in the contest, add 10 points, else add 8 points.
+    Also increments problem_solved in contest_scores by 1.
+    """
+    try:
+        conn = sqlite3.connect('db/db.db')
+        cursor = conn.cursor()
+
+        # Check if anyone in this contest has solved this problem before
+        cursor.execute('''
+            SELECT solved_problems FROM contest_participants
+            WHERE contest_id = ?
+        ''', (contest_id,))
+        rows = cursor.fetchall()
+        problem_solved_by_anyone = False
+        for row in rows:
+            solved_problems = row[0] if row and row[0] else ""
+            if solved_problems in (None, '', '[]'):
+                continue
+            # Split by comma and strip whitespace
+            solved_list = [link.strip() for link in solved_problems.split(',') if link.strip()]
+            # Check if problem_link matches any solved link
+            if any(problem_link == solved for solved in solved_list):
+                problem_solved_by_anyone = True
+                break
+
+        points = 8 if problem_solved_by_anyone else 10
+
+        # Get this user's solved_problems
+        cursor.execute('''
+            SELECT solved_problems FROM contest_participants
+            WHERE contest_id = ? AND user_id = ?
+        ''', (contest_id, user_id))
+        row = cursor.fetchone()
+        solved_problems = row[0] if row and row[0] else ""
+
+        if solved_problems in (None, '', '[]'):
+            solved_problems_list = []
+        else:
+            solved_problems_list = [link.strip() for link in solved_problems.split(',') if link.strip()]
+
+        already_solved = problem_link in solved_problems_list
+
+        if not already_solved:
+            solved_problems_list.append(problem_link)
+            solved_problems_str = ','.join(solved_problems_list)
+            cursor.execute('''
+                UPDATE contest_participants
+                SET solved_problems = ?
+                WHERE contest_id = ? AND user_id = ?
+            ''', (solved_problems_str, contest_id, user_id))
+
+        # Update score in contest_participants
+        cursor.execute('''
+            UPDATE contest_participants
+            SET score = COALESCE(score, 0) + ?
+            WHERE contest_id = ? AND user_id = ?
+        ''', (points, contest_id, user_id))
+
+        # Update score and problem_solved in contest_scores
+        cursor.execute('''
+            UPDATE contest_scores
+            SET score = COALESCE(score, 0) + ?,
+                problem_solved = COALESCE(problem_solved, 0) + 1
+            WHERE contest_id = ? AND user_id = ?
+        ''', (points, contest_id, user_id))
+
+        conn.commit()
+        print(f"Contest score updated for user_id {user_id} in contest_id {contest_id} (+{points})")
+    except Exception as e:
+        print(f"Error updating contest score: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
 if __name__ == "__main__":
     # Replace with a valid user_id from your database
     test_user_id = 1

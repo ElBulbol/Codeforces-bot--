@@ -10,8 +10,7 @@ from utility.db_helpers import (
     add_contest_score_entry, update_contest_score, get_contest_solves_info, update_contest_solves_info,
     increment_user_solved_count
 )
-import json
-import aiosqlite
+from utility.recording_score import update_contest_score
 
 class ContestInteractionHandler:
     """Handles contest-related interactions like join and check solved buttons"""
@@ -247,35 +246,23 @@ class ContestInteractionHandler:
                     except Exception as e:
                         print(f"Error checking first solver: {e}")
 
-                    async with aiosqlite.connect("db/db.db") as db:
-                        # Update score in contest_participants table
-                        await db.execute(
-                            "UPDATE contest_participants SET score = score + ? WHERE contest_id = ? AND user_id = ?",
-                            (score, contest_id, user_id)
-                        )
-                        # Increment Number_of_problem_solved by 1 in users table
-                        await db.execute(
-                            "UPDATE users SET overall_score = overall_score + ?, daily_score = daily_score + ?, weekly_score = weekly_score + ?, monthly_score = monthly_score + ?, Number_of_problem_solved = Number_of_problem_solved + 1 WHERE user_id = ?",
-                            (int(score), int(score), int(score), int(score), user_id)
-                        )
-                        # Update solved_problems in contest_participants table
-                        async with db.execute(
-                            "SELECT solved_problems FROM contest_participants WHERE contest_id = ? AND user_id = ?",
-                            (contest_id, user_id)
-                        ) as cursor:
-                            row = await cursor.fetchone()
-                            if row and row[0]:
-                                solved_problems = row[0].split(',')
-                                if problem_link not in solved_problems:
-                                    solved_problems.append(problem_link)
-                            else:
-                                solved_problems = [problem_link]
-                            solved_problems_str = ','.join(solved_problems)
-                        await db.execute(
-                            "UPDATE contest_participants SET solved_problems = ? WHERE contest_id = ? AND user_id = ?",
-                            (solved_problems_str, contest_id, user_id)
-                        )
-                        await db.commit()
+                    # --- Integrate update_contest_score function here ---
+                    # This will update contest_participants and contest_scores tables
+                    try:
+                        user_id = int(interaction.user.id)
+                        # Ensure participant row exists
+                        await add_contest_score_entry(contest_id, str(interaction.user.id), participant['codeforces_handle'], score=0, problem_solved=0)
+                        # Now update score
+                        # Fetch user_id from users table using Discord ID
+                        user_data = await get_user_by_discord(str(interaction.user.id))
+                        if not user_data:
+                            await interaction.response.send_message("You need to link your Codeforces account first.", ephemeral=True)
+                            return
+                        user_id = user_data['user_id']  # This is the correct user_id from the database
+
+                        update_contest_score(contest_id, user_id, problem_link)
+                    except Exception as e:
+                        print(f"Error in update_contest_score: {e}")
 
                     await interaction.followup.send(
                         f"🎉 Congratulations! You solved problem {problem_index + 1} and earned {int(score)} points!",

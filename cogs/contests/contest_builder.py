@@ -24,10 +24,14 @@ class ContestBuilder:
     
     def create_contest(self, interaction_id: str) -> Dict:
         """Create a new contest builder session"""
+        start_time_dt = datetime.now() + timedelta(minutes=1)
+        unix_timestamp = int(start_time_dt.timestamp())
         self.contests[interaction_id] = {
             'name': 'Untitled Contest',
-            'duration': None,
-            'start_time': None,
+            'duration': 1,
+            'start_time': start_time_dt.isoformat(),
+            'start_minutes': 1,
+            'unix_timestamp': unix_timestamp,
             'problems': []  # List of dicts with {link, display_name, criteria}
         }
         return self.contests[interaction_id]
