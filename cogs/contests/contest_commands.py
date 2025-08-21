@@ -75,75 +75,120 @@ class ContestCommands(commands.GroupCog, name = "contest"):
 
         contest_data = await get_bot_contest(contest_id)
         duration = contest_data['duration']
+
+        # Normalize to unix timestamps so we always compute minutes:seconds from unix_end
+        now_unix = int(datetime.now().timestamp())
         unix_start = contest_data.get('unix_timestamp')
-        if unix_start:
-            unix_end = unix_start + duration * 60  # duration is in minutes
-            now_unix = int(datetime.now().timestamp())
-            time_left_seconds = unix_end - now_unix
-            minutes_left = max(time_left_seconds // 60, 0)
-            seconds_left = max(time_left_seconds % 60, 0)
-            countdown_text = f"⏳ Time left: {minutes_left}m {seconds_left}s\nEnds at: <t:{unix_end}:F> (<t:{unix_end}:R>)"
-            starts_at_text = f"<t:{unix_start}:F> (<t:{unix_start}:R>)"
-        else:
-            start_time = datetime.fromisoformat(contest_data['start_time'])
-            end_time = start_time + timedelta(minutes=duration)
-            now = datetime.now()
-            time_left = end_time - now
-            minutes_left = max(int(time_left.total_seconds() // 60), 0)
-            seconds_left = max(int(time_left.total_seconds() % 60), 0)
-            countdown_text = f"⏳ Time left: {minutes_left}m {seconds_left}s\nEnds at: {end_time.strftime('%d/%m/%Y %H:%M')}"
-            starts_at_text = start_time.strftime('%d/%m/%Y %H:%M')
+        if not unix_start:
+            # Try to derive unix_start from ISO start_time if available
+            try:
+                start_dt = datetime.fromisoformat(contest_data.get('start_time'))
+                unix_start = int(start_dt.timestamp())
+            except Exception:
+                # If no valid start time, assume starts now
+                unix_start = now_unix
+
+        unix_end = unix_start + int(duration) * 60
+
+        # Compute remaining time in seconds (non-negative)
+        time_left_seconds = max(unix_end - now_unix, 0)
+        minutes_left = time_left_seconds // 60
+        seconds_left = time_left_seconds % 60
+
+        # Format MM:SS (minutes may be more than 2 digits)
+        mmss = f"{minutes_left}:{seconds_left:02d}"
+
+        # Format time left as Discord relative timestamp
+        time_left_text = f"<t:{unix_end}:R>"
+
+        # Create embed showing only relative time left (uses unix_end)
+        embed = discord.Embed(
+            title=f"🏆 Contest Started: {contest_name}",
+            description="Get ready to solve problems and climb the leaderboard!",
+            color=discord.Color.blurple()
+        )
+
+        # Prepare unix timestamps for Discord formatting
+        starts_at_text = f"<t:{unix_start}:R>"  # Relative start time (e.g., "in 5 minutes")
+        countdown_text = f"<t:{unix_end}:R>"    # Relative end time (e.g., "in 2 hours")
 
         embed = discord.Embed(
-    title=f"🏁 Contest Started: {contest_name}",
-    description=(
-        f"**🕒 Starts at:** {starts_at_text}\n"
-        f"**⏳ Time left:** `{minutes_left}m {seconds_left}s`\n"
-        f"**🏁 Ends at:** <t:{unix_end}:F> (<t:{unix_end}:R>)\n"
-        f"\n"
-        f"**📋 Problems:**\n"
-    ),
-    color=discord.Color.green()
-)
+            title=f"🏆 Contest Started: {contest_name}",
+            description="Get ready to solve problems and climb the leaderboard!",
+            color=discord.Color.blurple()
+        )
 
-        # Add problems as a numbered list with hyperlinks
-        for i, problem in enumerate(problems):
+        embed.add_field(
+            name="🕒 Starts At",
+            value=starts_at_text,
+            inline=True
+        )
+
+        embed.add_field(
+            name="⏳ Countdown",
+            value=countdown_text,
+            inline=True
+        )
+
+        # Build a clean numbered problem list
+        problem_list = ""
+        for i, problem in enumerate(problems, start=1):
             if isinstance(problem, dict):
-                problem_name = problem.get("name", f"Problem {i+1}")
+                problem_name = problem.get("name", f"Problem {i}")
                 problem_link = problem.get("link", "")
             else:
-                problem_name = f"Problem {i+1}"
+                problem_name = f"Problem {i}"
                 problem_link = problem
-            embed.add_field(
-                name=f"🔗 Problem {i+1}",
-                value=f"[{problem_name}]({problem_link})",
-                inline=False
-            )
+            problem_list += f"**{i}.** [{problem_name}]({problem_link})\n"
 
-        embed.set_footer(text="Good luck! Submit your solutions before time runs out.")
+        embed.add_field(
+            name="📘 Problems",
+            value=problem_list if problem_list else "No problems added.",
+            inline=False
+        )
+
+        embed.set_footer(text=f"Contest ID: {contest_id} • Good luck! 🚀")
 
         # Buttons
         view = discord.ui.View(timeout=None)
-        for i, problem in enumerate(problems):
+        for i in range(len(problems)):
             view.add_item(discord.ui.Button(
-                label=f"Check Solved - P{i+1}",
-                style=discord.ButtonStyle.secondary,
+                label=f"✅ P{i+1}",
+                style=discord.ButtonStyle.primary,
                 custom_id=f"check_{contest_id}_{i}"
             ))
 
         if not participant_role and channel.guild:
             participant_role = channel.guild.get_role(PARTICIPANT_ROLE_ID)
 
-        await channel.send(
+        message = await channel.send(
             content=f"{participant_role.mention if participant_role else 'Participants'}",
             embed=embed,
             view=view
         )
         print(f"Started contest {contest_id}")
 
+        # store message and start countdown task for this contest
+        self.active_contests[contest_id]['message'] = message
+        self.active_contests[contest_id]['unix_end'] = unix_end
+
+        # start background countdown task (edits the message every second)
+        task = asyncio.create_task(self._countdown_task(contest_id, message, unix_end, contest_name, problems))
+        self.active_contests[contest_id]['countdown_task'] = task
+
     async def end_contest(self, contest_id, contest_name):
         # Update status in DB
         await update_contest_status(contest_id, 'ENDED')
+
+        # cancel countdown task if exists
+        active = self.active_contests.get(contest_id)
+        if active:
+            task = active.get('countdown_task')
+            if task and not task.done():
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
 
         channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         if channel:
@@ -155,43 +200,52 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             if results:
                 embed = discord.Embed(
                     title=f"🏆 Final Results: {contest_name}",
-                    description=f"Contest ID: {contest_id}",
+                    description=f"📌 Contest ID: `{contest_id}`",
                     color=discord.Color.gold()
                 )
                 
-                results_text = ""
+                # Build leaderboard text
+                top3_text = ""
+                others_text = ""
+
                 for rank, result in enumerate(results, 1):
                     discord_id = result['discord_id']
                     handle = result['codeforces_handle']
                     score = result['score']
                     user = self.bot.get_user(int(discord_id))
                     user_mention = user.mention if user else f"ID: {discord_id}"
-                    
-                    # Add medal emojis for top 3
+
+                    # Top 3 with medals
                     if rank == 1:
                         medal = "🥇"
+                        top3_text += f"{medal} {user_mention} ({handle}) — **{score} pts**\n"
                     elif rank == 2:
                         medal = "🥈"
+                        top3_text += f"{medal} {user_mention} ({handle}) — **{score} pts**\n"
                     elif rank == 3:
                         medal = "🥉"
+                        top3_text += f"{medal} {user_mention} ({handle}) — **{score} pts**\n"
                     else:
-                        medal = f"**{rank}.**"
-                    
-                    results_text += f"{medal} {user_mention} ({handle}) - **{score} points**\n"
-                
-                embed.add_field(name="Leaderboard", value=results_text, inline=False)
-                
-                # Add congratulations message
+                        others_text += f"`#{rank}` {user_mention} ({handle}) — {score} pts\n"
+
+                if top3_text:
+                    embed.add_field(name="👑 Top 3", value=top3_text, inline=False)
+                if others_text:
+                    embed.add_field(name="📊 Other Participants", value=others_text, inline=False)
+
+                # Highlight winner separately
                 if len(results) > 0:
                     winner = results[0]
                     winner_user = self.bot.get_user(int(winner['discord_id']))
                     winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
                     embed.add_field(
-                        name="🎉 Congratulations!", 
-                        value=f"Winner: {winner_mention} with {winner['score']} points!", 
+                        name="🎉 Champion",
+                        value=f"All hail {winner_mention} with **{winner['score']} pts**!",
                         inline=False
                     )
-                
+
+                embed.set_footer(text="Thanks for participating! 🚀")
+
                 await channel.send(embed=embed)
             else:
                 await channel.send("No participants found for this contest.")
@@ -320,13 +374,13 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         # Format start time using Discord timestamp syntax if unix_timestamp is available
         if contest_data.get('unix_timestamp'):
             unix_timestamp = contest_data['unix_timestamp']
-            start_time_display = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
+            start_time_display = f"<t:{unix_timestamp}:R>"
         else:
             # Fallback to regular format and try to convert to unix timestamp
             try:
                 start_time_dt = datetime.fromisoformat(start_time_str)
                 unix_timestamp = int(start_time_dt.timestamp())
-                start_time_display = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
+                start_time_display = f"<t:{unix_timestamp}:R>"
             except (ValueError, TypeError):
                 start_time_display = "Not set or invalid format"
 
@@ -504,12 +558,4 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         problem_name = get_codeforces_problem_name(cf_contest_id, problem_letter)
         if not problem_name:
             problem_name = f"Problem {problem_letter}"
-
-        # Store both link and name in your contest's problems list
-        # (Assuming you have a function to do this, e.g., update_contest_problems_with_name)
-        await update_contest_problems(contest_id, [{"link": problem_link, "name": problem_name}])
-
-        await interaction.followup.send(f"Problem [{problem_name}]({problem_link}) added to contest {contest_id}.", ephemeral=True)
-
-async def setup(bot):
-    await bot.add_cog(ContestCommands(bot))
+        await update_contest_problems(contest_id, [{"link": problem_link, "name": problem_name}])        # (Assuming you have a function to do this, e.g., update_contest_problems_with_name)        # Store both link and name in your contest's problems list            problem_name = f"Problem {problem_letter}"    await bot.add_cog(ContestCommands(bot))

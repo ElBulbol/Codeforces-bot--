@@ -421,7 +421,7 @@ class ContestBuilderView(discord.ui.View):
             # Use Discord timestamp if available, otherwise fallback to formatted time
             if contest_data.get('unix_timestamp'):
                 unix_timestamp = contest_data['unix_timestamp']
-                starts_at_text = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
+                starts_at_text = f"<t:{unix_timestamp}:R>"
             else:
                 start_time_dt = datetime.fromisoformat(contest_data['start_time'])
                 starts_at_text = start_time_dt.strftime('%d/%m/%Y %H:%M')
@@ -523,7 +523,7 @@ def create_contest_setup_embed(contest_data: Dict) -> discord.Embed:
         unix_timestamp = contest_data['unix_timestamp']
         # Discord timestamp formats: <t:timestamp:format>
         # F = Full date/time, R = Relative time
-        start_time_text = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
+        start_time_text = f"<t:{unix_timestamp}:R>"
         
         # Add minutes/hours display if available
         if contest_data.get('start_minutes'):
@@ -540,7 +540,7 @@ def create_contest_setup_embed(contest_data: Dict) -> discord.Embed:
     elif contest_data.get('start_time'):
         try:
             start_time_dt = datetime.fromisoformat(contest_data['start_time'])
-            start_time_text = start_time_dt.strftime("%d/%m/%Y %H:%M")
+            start_time_text = start_time_dt.strftime("%H:%M")
         except:
             start_time_text = "Invalid format"
     else:

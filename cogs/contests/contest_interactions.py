@@ -312,7 +312,7 @@ class ContestInteractionHandler:
                     # Use Discord timestamp if available, otherwise fallback to formatted time
                     if contest_data.get('unix_timestamp'):
                         unix_timestamp = contest_data['unix_timestamp']
-                        starts_at_text = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
+                        starts_at_text = f"<t:{unix_timestamp}:R>"
                     else:
                         start_time_dt = datetime.fromisoformat(contest_data['start_time'])
                         starts_at_text = start_time_dt.strftime('%d/%m/%Y %H:%M')
