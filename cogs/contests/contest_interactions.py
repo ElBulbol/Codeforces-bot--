@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 import json
 from datetime import datetime
+from utility.constants import ANNOUNCEMENT_CHANNEL_ID
 from utility.db_helpers import (
     get_bot_contest, get_user_by_discord, join_contest, get_contest_participant_count,
     get_contest_participant, get_contest_problems, update_contest_participant_score
@@ -15,7 +16,6 @@ class ContestInteractionHandler:
     
     def __init__(self, bot):
         self.bot = bot
-        self.ANNOUNCEMENT_CHANNEL_ID = 637013889439105058  # bot-testing
     
     async def handle_join_contest(self, interaction: discord.Interaction, custom_id: str):
         """Handle join contest button clicks"""
@@ -185,7 +185,7 @@ class ContestInteractionHandler:
 
     async def _update_announcement_with_participant_count(self, interaction: discord.Interaction, contest_data: dict, contest_id: int, participant_count: int):
         """Update the original announcement message with participant count"""
-        announcement_channel = self.bot.get_channel(self.ANNOUNCEMENT_CHANNEL_ID)
+        announcement_channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         if not announcement_channel:
             return
 

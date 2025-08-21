@@ -7,6 +7,7 @@ import re
 import asyncio
 import time
 from utility.random_problems import get_random_problem
+from utility.constants import AUTH_ROLE_NAME, AUTH_ROLE_ID, CHALLENGE_CHANNEL_ID
 from utility.db_helpers import (
     get_cf_handle,
     get_user_info,
@@ -215,10 +216,10 @@ class Challenges(commands.Cog):
             return
     
         # Check for Auth role
-        auth_role = discord.utils.get(interaction.guild.roles, name="Auth")
+        auth_role = discord.utils.get(interaction.guild.roles, name=AUTH_ROLE_NAME)
         if not auth_role:
             # Try by ID if name doesn't work
-            auth_role = interaction.guild.get_role(1405358190400508005)
+            auth_role = interaction.guild.get_role(AUTH_ROLE_ID)
             if not auth_role:
                 await interaction.followup.send("The 'Auth' role doesn't exist on this server.", ephemeral=True)
                 return
@@ -480,7 +481,7 @@ class Challenges(commands.Cog):
         view = ChallengeView(self.bot, challenge_id, valid_members)
     
         # Get the specified channel
-        challenge_channel = self.bot.get_channel(1404857696666128405)
+        challenge_channel = self.bot.get_channel(CHALLENGE_CHANNEL_ID)
     
         if challenge_channel:
             # Send to the designated channel

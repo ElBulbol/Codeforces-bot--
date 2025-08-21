@@ -1,22 +1,16 @@
-from typing import Optional
 import discord
 from discord.ext import commands
 from discord import app_commands
 from discord.ext import tasks
 from datetime import datetime, timedelta
+from .contest_builder import ContestBuilderView, contest_builder, create_contest_setup_embed
+from utility.constants import PARTICIPANT_ROLE_ID, ANNOUNCEMENT_CHANNEL_ID, MENTOR_ROLE_ID
 from utility.db_helpers import (
     get_bot_contest, 
     get_pending_and_active_contests, update_contest_status,
     get_contest_problems, get_contest_leaderboard, get_all_bot_contests
 )
 
-# Import the contest builder components
-from .contest_builder import (
-    ContestBuilder, SetNameModal, SetDurationModal, SetStartTimeModal,
-    AddProblemBuilderModal, ContestBuilderView, contest_builder,
-    create_contest_setup_embed, create_contest_completed_embed,
-    MENTOR_ROLE_ID, PARTICIPANT_ROLE_ID, ANNOUNCEMENT_CHANNEL_ID
-)
 
 class ContestCommands(commands.GroupCog, name = "contest"):
     def __init__(self, bot):

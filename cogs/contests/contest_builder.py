@@ -1,21 +1,14 @@
 import re
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from typing import Optional
 import discord
 from discord.ext import commands
-from discord import app_commands
-from discord.ext import tasks
 import aiohttp
 from datetime import datetime, timedelta
-import asyncio
-import json
 from utility.random_problems import get_random_problem
 from utility.db_helpers import get_contest_participant_count, update_contest_problems, create_bot_contest
+from utility.constants import PARTICIPANT_ROLE_ID, ANNOUNCEMENT_CHANNEL_ID
 
-# Role and Channel IDs
-MENTOR_ROLE_ID = 1405870294471540807 # Mentor
-PARTICIPANT_ROLE_ID = 1404736993035812934 # CP
-ANNOUNCEMENT_CHANNEL_ID = 1404857696666128405 # bot-testing
 
 class ContestBuilder:
     """Temporary storage for contest data while building"""

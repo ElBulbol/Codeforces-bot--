@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import aiohttp
 from utility.db_helpers import get_user_by_discord, add_user, delete_user
+from utility.constants import AUTH_ROLE_NAME, AUTH_ROLE_ID
 
 class AuthenticationView(discord.ui.View):
     def __init__(self, timeout=180):
@@ -168,11 +169,11 @@ class Authentication(commands.Cog):
                         # Try to assign the Auth role
                         try:
                             # Try to get the role by name first
-                            auth_role = discord.utils.get(interaction.guild.roles, name="Auth")
+                            auth_role = discord.utils.get(interaction.guild.roles, name=AUTH_ROLE_NAME)
                             
                             # If not found by name, try to get by ID
                             if not auth_role:
-                                auth_role = interaction.guild.get_role(1405358190400508005)
+                                auth_role = interaction.guild.get_role(AUTH_ROLE_ID)
                             
                             if auth_role:
                                 # Check if user already has the role
@@ -447,9 +448,9 @@ class Authentication(commands.Cog):
                 if cf_db_success:
                     # Try to get the Auth role
                     try:
-                        auth_role = discord.utils.get(interaction.guild.roles, name="Auth")
+                        auth_role = discord.utils.get(interaction.guild.roles, name=AUTH_ROLE_NAME)
                         if not auth_role:
-                            auth_role = interaction.guild.get_role(1405358190400508005)
+                            auth_role = interaction.guild.get_role(AUTH_ROLE_ID)
                         
                         # Remove the role if the target has it
                         role_removed = False
