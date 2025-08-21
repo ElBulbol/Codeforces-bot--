@@ -22,13 +22,13 @@ class ContestCommands(commands.GroupCog, name = "contest"):
     def __init__(self, bot):
         self.bot = bot
         self.active_contests = {}  # To store views for active contests
-        self.contest_loop.start()
+        self.check_contests.start()
 
     def cog_unload(self):
-        self.contest_loop.cancel()
+        self.check_contests.cancel()
 
-    @tasks.loop(minutes=1)
-    async def contest_loop(self):
+    @tasks.loop(seconds=10)  # Check every 10 seconds instead of every minute
+    async def check_contests(self):
         # This loop checks for contests to start or end
         contests = await get_pending_and_active_contests()
 
@@ -65,7 +65,6 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                 continue
     
     async def start_contest(self, contest_id, contest_name, problems, participant_role):
-        # Update status in DB to prevent restarts
         await update_contest_status(contest_id, 'ACTIVE')
 
         channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
@@ -73,23 +72,73 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             return
 
         self.active_contests[contest_id] = {}
-        
-        embed = discord.Embed(
-            title=f"Contest Started: {contest_name}",
-            description="Solve the problems and check your solutions below.",
-            color=discord.Color.green()
-        )
-        
-        view = discord.ui.View(timeout=None)
-        for i, problem_link in enumerate(problems):
-            embed.add_field(name=f"Problem {i+1}", value=f"[Link]({problem_link})", inline=False)
-            view.add_item(discord.ui.Button(label=f"Check Solved - P{i+1}", style=discord.ButtonStyle.secondary, custom_id=f"check_{contest_id}_{i}"))
 
-        # Always try to get the participant role from the guild where the channel is
+        contest_data = await get_bot_contest(contest_id)
+        duration = contest_data['duration']
+        unix_start = contest_data.get('unix_timestamp')
+        if unix_start:
+            unix_end = unix_start + duration * 60  # duration is in minutes
+            now_unix = int(datetime.now().timestamp())
+            time_left_seconds = unix_end - now_unix
+            minutes_left = max(time_left_seconds // 60, 0)
+            seconds_left = max(time_left_seconds % 60, 0)
+            countdown_text = f"⏳ Time left: {minutes_left}m {seconds_left}s\nEnds at: <t:{unix_end}:F> (<t:{unix_end}:R>)"
+            starts_at_text = f"<t:{unix_start}:F> (<t:{unix_start}:R>)"
+        else:
+            start_time = datetime.fromisoformat(contest_data['start_time'])
+            end_time = start_time + timedelta(minutes=duration)
+            now = datetime.now()
+            time_left = end_time - now
+            minutes_left = max(int(time_left.total_seconds() // 60), 0)
+            seconds_left = max(int(time_left.total_seconds() % 60), 0)
+            countdown_text = f"⏳ Time left: {minutes_left}m {seconds_left}s\nEnds at: {end_time.strftime('%d/%m/%Y %H:%M')}"
+            starts_at_text = start_time.strftime('%d/%m/%Y %H:%M')
+
+        embed = discord.Embed(
+    title=f"🏁 Contest Started: {contest_name}",
+    description=(
+        f"**🕒 Starts at:** {starts_at_text}\n"
+        f"**⏳ Time left:** `{minutes_left}m {seconds_left}s`\n"
+        f"**🏁 Ends at:** <t:{unix_end}:F> (<t:{unix_end}:R>)\n"
+        f"\n"
+        f"**📋 Problems:**\n"
+    ),
+    color=discord.Color.green()
+)
+
+        # Add problems as a numbered list with hyperlinks
+        for i, problem in enumerate(problems):
+            if isinstance(problem, dict):
+                problem_name = problem.get("name", f"Problem {i+1}")
+                problem_link = problem.get("link", "")
+            else:
+                problem_name = f"Problem {i+1}"
+                problem_link = problem
+            embed.add_field(
+                name=f"🔗 Problem {i+1}",
+                value=f"[{problem_name}]({problem_link})",
+                inline=False
+            )
+
+        embed.set_footer(text="Good luck! Submit your solutions before time runs out.")
+
+        # Buttons
+        view = discord.ui.View(timeout=None)
+        for i, problem in enumerate(problems):
+            view.add_item(discord.ui.Button(
+                label=f"Check Solved - P{i+1}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"check_{contest_id}_{i}"
+            ))
+
         if not participant_role and channel.guild:
             participant_role = channel.guild.get_role(PARTICIPANT_ROLE_ID)
-        
-        await channel.send(content=f"{participant_role.mention if participant_role else 'Participants'}", embed=embed, view=view)
+
+        await channel.send(
+            content=f"{participant_role.mention if participant_role else 'Participants'}",
+            embed=embed,
+            view=view
+        )
         print(f"Started contest {contest_id}")
 
     async def end_contest(self, contest_id, contest_name):
@@ -437,37 +486,30 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         """Adds a problem to an existing contest."""
         await interaction.response.defer(ephemeral=True)
 
-        # Extract contest and problem from URL
+        # Extract contest_id and problem_index from the URL
         try:
             parts = problem_link.strip('/').split('/')
             if "contest" in parts:
                 contest_index = parts.index("contest")
                 cf_contest_id = parts[contest_index + 1]
-            elif "problemset" in parts:
-                problem_index = parts.index("problem")
-                cf_contest_id = parts[problem_index + 1]
-            elif "gym" in parts:
-                gym_index = parts.index("gym")
-                cf_contest_id = parts[gym_index + 1]
+                problem_letter = parts[-1]
             else:
                 await interaction.followup.send("Unsupported problem URL format.", ephemeral=True)
                 return
-            
-            problem_letter = parts[-1]
         except (IndexError, ValueError):
             await interaction.followup.send("Invalid problem link format.", ephemeral=True)
             return
 
-        contest_data = await get_bot_contest(contest_id)
-        if not contest_data:
-            await interaction.followup.send(f"Contest with ID {contest_id} not found.", ephemeral=True)
-            return
+        # Fetch problem name from Codeforces API
+        problem_name = get_codeforces_problem_name(cf_contest_id, problem_letter)
+        if not problem_name:
+            problem_name = f"Problem {problem_letter}"
 
-        # Here you would add the logic to associate the problem with the contest in your database
-        # For example, inserting into a contest_problems table or similar
-        # This part depends on how your database and tables are structured
+        # Store both link and name in your contest's problems list
+        # (Assuming you have a function to do this, e.g., update_contest_problems_with_name)
+        await update_contest_problems(contest_id, [{"link": problem_link, "name": problem_name}])
 
-        await interaction.followup.send(f"Problem {problem_link} added to contest {contest_id}.", ephemeral=True)
+        await interaction.followup.send(f"Problem [{problem_name}]({problem_link}) added to contest {contest_id}.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(ContestCommands(bot))

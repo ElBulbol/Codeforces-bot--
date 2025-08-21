@@ -44,8 +44,7 @@ class Misc(commands.Cog):
         
         commands_list = sorted(self.bot.tree.get_commands(), key=lambda c: c.name)
         for command in commands_list:
-            embed.add_field(name=f"/{command.name}", value=command.description, inline=False)
-        
+            embed.add_field(name=problem_name, value=f"[{problem_name}]({problem_link})", inline=False)
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="init", description="check the connection to the bot")
