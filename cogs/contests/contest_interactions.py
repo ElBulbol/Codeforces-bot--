@@ -56,6 +56,12 @@ class ContestInteractionHandler:
                     (contest_id, str(interaction.user.id))
                 )
                 await db.commit()
+                # --- Cleanup orphaned contest_participants rows ---
+                await db.execute("""
+                    DELETE FROM contest_participants
+                    WHERE user_id NOT IN (SELECT user_id FROM users)
+                """)
+                await db.commit()
             # Add entry to contest_scores table
             await add_contest_score_entry(contest_id, str(interaction.user.id), user_data['cf_handle'], score=0, problem_solved=0)
             await interaction.response.send_message(
