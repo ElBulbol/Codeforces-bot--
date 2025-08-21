@@ -289,5 +289,55 @@ class Leaderboard(commands.Cog):
             print(f"Error in overall_leaderboard command: {e}")
             await interaction.followup.send("An error occurred while retrieving the leaderboard.")
     
+    @app_commands.command(name="my_stats", description="Show your leaderboard statistics")
+    async def my_stats(self, interaction: discord.Interaction):
+        """Show your personal statistics"""
+        await interaction.response.defer()
+        
+        try:
+            await self.sync_cf_handles()
+            discord_id = str(interaction.user.id)
+            
+            user = await self.get_user(discord_id)
+            
+            if not user or (user[2] == 0 and user[3] == 0 and user[4] == 0 and user[5] == 0):
+                await interaction.followup.send("You don't have any points yet. Solve some challenges to earn points!")
+                return
+            
+            cf_handle = user[1] if user[1] else "Not linked"
+            daily = user[2]
+            weekly = user[3]
+            monthly = user[4]
+            overall = user[5]
+            
+            embed = discord.Embed(
+                title=f"Stats for {interaction.user.display_name}",
+                description=f"CodeForces Handle: {cf_handle}",
+                color=discord.Color.brand_green()
+            )
+            
+            embed.add_field(name="Daily Score", value=str(daily), inline=True)
+            embed.add_field(name="Weekly Score", value=str(weekly), inline=True)
+            embed.add_field(name="Monthly Score", value=str(monthly), inline=True)
+            embed.add_field(name="Overall Score", value=str(overall), inline=False)
+            
+            # Get ranks for each leaderboard
+            try:
+                for score_type, score_name in [
+                    ("daily_score", "Daily Rank"), 
+                    ("weekly_score", "Weekly Rank"), 
+                    ("monthly_score", "Monthly Rank"),
+                    ("overall_score", "Overall Rank")
+                ]:
+                    rank = await get_user_leaderboard_rank(discord_id, score_type)
+                    embed.add_field(name=score_name, value=f"#{rank}", inline=True)
+            except Exception as e:
+                print(f"Error getting ranks for user {discord_id}: {e}")
+            
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            print(f"Error in my_stats command: {e}")
+            await interaction.followup.send("An error occurred while retrieving your stats.")
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(Leaderboard(bot))

@@ -3,15 +3,12 @@ Contest interaction handlers for join contest and check solved buttons
 """
 import discord
 from discord.ext import commands
+import json
 from datetime import datetime
 from utility.db_helpers import (
     get_bot_contest, get_user_by_discord, join_contest, get_contest_participant_count,
-    get_contest_participant, get_contest_problems, update_contest_participant_score,
-    add_contest_score_entry, update_contest_score, get_contest_solves_info, update_contest_solves_info,
-    increment_user_solved_count
+    get_contest_participant, get_contest_problems, update_contest_participant_score
 )
-from utility.recording_score import update_contest_score
-from .contest_builder import ContestBuilderView, contest_builder
 
 class ContestInteractionHandler:
     """Handles contest-related interactions like join and check solved buttons"""
@@ -48,22 +45,6 @@ class ContestInteractionHandler:
         was_already_joined = False
         try:
             await join_contest(contest_id, str(interaction.user.id), user_data['cf_handle'])
-            # Ensure row exists in contest_participants
-            import aiosqlite
-            async with aiosqlite.connect("db/db.db") as db:
-                await db.execute(
-                    "INSERT OR IGNORE INTO contest_participants (contest_id, user_id, score, solved_problems) VALUES (?, ?, 0, '')",
-                    (contest_id, str(interaction.user.id))
-                )
-                await db.commit()
-                # --- Cleanup orphaned contest_participants rows ---
-                await db.execute("""
-                    DELETE FROM contest_participants
-                    WHERE user_id NOT IN (SELECT user_id FROM users)
-                """)
-                await db.commit()
-            # Add entry to contest_scores table
-            await add_contest_score_entry(contest_id, str(interaction.user.id), user_data['cf_handle'], score=0, problem_solved=0)
             await interaction.response.send_message(
                 f"✅ Successfully joined contest: **{contest_data['name']}**!", 
                 ephemeral=True
@@ -133,50 +114,26 @@ class ContestInteractionHandler:
         # Extract contest and problem from URL
         try:
             parts = problem_link.strip('/').split('/')
-            # Debug print to see the URL parts
-            print(f"Problem URL parts: {parts}")
-            
-            if "contest" in parts:
-                contest_index = parts.index("contest")
-                cf_contest_id = parts[contest_index + 1]
-            elif "problemset" in parts:
-                problem_index_in_url = parts.index("problem")
-                cf_contest_id = parts[problem_index_in_url + 1]
-            elif "gym" in parts:
-                gym_index = parts.index("gym")
-                cf_contest_id = parts[gym_index + 1]
-            else:
-                await interaction.followup.send("Unsupported problem URL format.", ephemeral=True)
-                return
-            
+            cf_contest_id = parts[-2]
             problem_letter = parts[-1]
-            print(f"Extracted contest ID: {cf_contest_id}, problem letter: {problem_letter}")
-            
-        except (IndexError, ValueError) as e:
-            await interaction.followup.send(f"Invalid problem link format: {str(e)}", ephemeral=True)
+        except (IndexError, ValueError):
+            await interaction.followup.send("Invalid problem link format.", ephemeral=True)
             return
 
         # Check if user solved the problem
         try:
-            cf_handle = participant['codeforces_handle']
-            print(f"Checking submissions for user: {cf_handle}")
-            
-            api_url = f"https://codeforces.com/api/user.status?handle={cf_handle}&from=1&count=1000"
-            print(f"API URL: {api_url}")
-            
-            async with self.bot.session.get(api_url) as resp:
+            async with self.bot.session.get(
+                f"https://codeforces.com/api/user.status?handle={participant['codeforces_handle']}&from=1&count=1000"
+            ) as resp:
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    print(f"API error: {resp.status}, {error_text}")
                     await interaction.followup.send(
-                        f"Error checking Codeforces API. Status: {resp.status}", 
+                        "Error checking Codeforces API. Please try again later.", 
                         ephemeral=True
                     )
                     return
                 
                 data = await resp.json()
                 if data.get('status') != 'OK':
-                    print(f"API returned non-OK status: {data}")
                     await interaction.followup.send(
                         f"Codeforces API error: {data.get('comment', 'Unknown error')}", 
                         ephemeral=True
@@ -185,103 +142,35 @@ class ContestInteractionHandler:
 
                 # Check if problem is solved
                 solved = False
-                problem_rating = 0
                 for submission in data['result']:
-                    submission_contest_id = str(submission['problem'].get('contestId', ''))
-                    submission_index = submission['problem'].get('index', '')
-                    submission_verdict = submission.get('verdict', '')
-                    
-                    print(f"Comparing: {submission_contest_id}=={cf_contest_id} and {submission_index}=={problem_letter} and verdict={submission_verdict}")
-                    
-                    if (submission_contest_id == cf_contest_id and 
-                        submission_index == problem_letter and 
-                        submission_verdict == 'OK'):
+                    if (str(submission['problem']['contestId']) == cf_contest_id and 
+                        submission['problem']['index'] == problem_letter and 
+                        submission['verdict'] == 'OK'):
                         solved = True
-                        # Get problem rating if available
-                        if 'rating' in submission['problem']:
-                            problem_rating = submission['problem']['rating']
-                        print(f"Found matching solved submission! Problem rating: {problem_rating}")
                         break
 
-                print(f"Final solved status: {solved}")
-                
                 if solved:
-                    # --- Prevent multiple rewards for the same problem ---
-                    # Get solves info for this contest
-                    solves_info = await get_contest_solves_info(contest_id)
-                    user_id = str(interaction.user.id)
-                    problem_key = f"{contest_id}-{problem_link}"
-
-                    # Check if user already got points for this problem
-                    already_solved = solves_info.get(user_id, [])
-                    if problem_key in already_solved:
+                    # Check if already counted
+                    solved_problems = json.loads(participant.get('solved_problems', '[]'))
+                    if problem_index not in solved_problems:
+                        solved_problems.append(problem_index)
+                        
+                        # Award points (could be adjusted based on your scoring system)
+                        points = 100  # Base points per problem
+                        
+                        await update_contest_participant_score(
+                            contest_id, str(interaction.user.id), points, solved_problems
+                        )
+                        
                         await interaction.followup.send(
-                            "You have already received points for solving this problem.",
+                            f"🎉 Congratulations! You solved problem {problem_index + 1} and earned {points} points!", 
                             ephemeral=True
                         )
-                        return
-
-                    # Mark as solved for this user
-                    if user_id not in solves_info:
-                        solves_info[user_id] = []
-                    solves_info[user_id].append(problem_key)
-                    await update_contest_solves_info(contest_id, solves_info)
-
-                    # --- Continue with scoring logic ---
-                    # Calculate score
-                    score = (problem_rating / 100) if problem_rating else 8
-                    # First solver bonus (if needed)
-                    is_first_solver = False
-                    try:
-                        # Get current solves info for this contest
-                        solves_info = await get_contest_solves_info(contest_id)
-                        if not solves_info or problem_link not in solves_info:
-                            # First solver gets bonus points
-                            is_first_solver = True
-                            score += 3
-                            # Update solves info
-                            if not solves_info:
-                                solves_info = {}
-                            solves_info[problem_link] = str(interaction.user.id)
-                            await update_contest_solves_info(contest_id, solves_info)
-                    except Exception as e:
-                        print(f"Error checking first solver: {e}")
-
-                    # --- Integrate update_contest_score function here ---
-                    # This will update contest_participants and contest_scores tables
-                    try:
-                        user_id = int(interaction.user.id)
-                        # Ensure participant row exists
-                        await add_contest_score_entry(contest_id, str(interaction.user.id), participant['codeforces_handle'], score=0, problem_solved=0)
-                        # Now update score
-                        # Fetch user_id from users table using Discord ID
-                        user_data = await get_user_by_discord(str(interaction.user.id))
-                        if not user_data:
-                            await interaction.response.send_message("You need to link your Codeforces account first.", ephemeral=True)
-                            return
-                        user_id = user_data['user_id']  # This is the correct user_id from the database
-
-                        update_contest_score(contest_id, user_id, problem_link)
-                    except Exception as e:
-                        print(f"Error in update_contest_score: {e}")
-
-                    await interaction.followup.send(
-                        f"🎉 Congratulations! You solved problem {problem_index + 1} and earned {int(score)} points!",
-                        ephemeral=True
-                    )
-
-                    # Send public message to the solved notification channel
-                    solved_channel_id = 1404857696666128405
-                    solved_channel = self.bot.get_channel(solved_channel_id)
-                    if solved_channel:
-                        if is_first_solver:
-                            await solved_channel.send(
-                                f"🚀 First accepted for problem {problem_index + 1} by <@{interaction.user.id}> in contest **{contest_data['name']}**!"
-                            )
-                        else:
-                            await solved_channel.send(
-                                f"✅ <@{interaction.user.id}> has solved problem {problem_index + 1} in contest **{contest_data['name']}**!"
-                            )
+                    else:
+                        await interaction.followup.send(
+                            f"You've already been awarded points for problem {problem_index + 1}.", 
+                            ephemeral=True
+                        )
                 else:
                     await interaction.followup.send(
                         f"Problem {problem_index + 1} is not solved yet. Keep trying! 💪", 
@@ -289,7 +178,6 @@ class ContestInteractionHandler:
                     )
 
         except Exception as e:
-            print(f"Exception in handle_check_solved: {e}")
             await interaction.followup.send(
                 f"Error checking solution status: {str(e)}", 
                 ephemeral=True
@@ -313,7 +201,7 @@ class ContestInteractionHandler:
                     # Use Discord timestamp if available, otherwise fallback to formatted time
                     if contest_data.get('unix_timestamp'):
                         unix_timestamp = contest_data['unix_timestamp']
-                        starts_at_text = f"<t:{unix_timestamp}:R>"
+                        starts_at_text = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
                     else:
                         start_time_dt = datetime.fromisoformat(contest_data['start_time'])
                         starts_at_text = start_time_dt.strftime('%d/%m/%Y %H:%M')

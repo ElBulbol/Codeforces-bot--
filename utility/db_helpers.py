@@ -2,8 +2,6 @@ import aiosqlite
 import os
 import json
 from typing import Dict, List, Optional
-import time
-import sqlite3
 
 
 # Global database path
@@ -19,17 +17,15 @@ async def init_db() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # Users table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 discord_id TEXT UNIQUE NOT NULL,
                 cf_handle TEXT UNIQUE NOT NULL,
-                verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                Number_of_problem_solved INTEGER DEFAULT 0,
-                overall_score INTEGER DEFAULT 0,
-                daily_score INTEGER DEFAULT 0,
-                weekly_score INTEGER DEFAULT 0,
-                monthly_score INTEGER DEFAULT 0
+                verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
@@ -37,7 +33,7 @@ async def init_db() -> None:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS challenges (
                 challenge_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                problem_link TEXT NOT NULL,
+                problem_id TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -85,36 +81,19 @@ async def init_db() -> None:
             )
         """)
         
-        # Contest Scores table
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS contest_scores (
-                contest_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                cf_handle TEXT NOT NULL,
-                problem_solved INTEGER DEFAULT 0,
-                score INTEGER DEFAULT 0,
-                PRIMARY KEY (contest_id, user_id),
-                FOREIGN KEY (contest_id) REFERENCES contests(contest_id),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        """)
-        
         await db.commit()
 
 
 async def add_user(discord_id: str, cf_handle: str) -> int:
     """Add a new user and return their user_id."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO users (discord_id, cf_handle, Number_of_problem_solved) VALUES (?, ?, 0)",
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "INSERT INTO users (discord_id, cf_handle) VALUES (?, ?)",
             (discord_id, cf_handle)
         )
         await db.commit()
-        cursor = await db.execute(
-            "SELECT user_id FROM users WHERE discord_id = ?", (discord_id,)
-        )
-        row = await cursor.fetchone()
-        return row[0] if row else None
+        return cursor.lastrowid
 
 
 async def get_user_by_discord(discord_id: str) -> Optional[Dict]:
@@ -129,12 +108,13 @@ async def get_user_by_discord(discord_id: str) -> Optional[Dict]:
         return dict(row) if row else None
 
 
-async def create_challenge(problem_link: str) -> int:
+async def create_challenge(problem_id: str) -> int:
     """Create a new challenge and return the challenge_id."""
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "INSERT INTO challenges (problem_link, created_at) VALUES (?, ?)",
-            (problem_link, int(time.time()))
+            "INSERT INTO challenges (problem_id) VALUES (?)",
+            (problem_id,)
         )
         await db.commit()
         return cursor.lastrowid
@@ -146,10 +126,12 @@ async def add_challenge_participant(
     score_awarded: int = 0, 
     is_winner: bool = False
 ) -> None:
+    """Add a participant to a challenge."""
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         await db.execute(
             "INSERT INTO challenge_participants (challenge_id, user_id, score_awarded, is_winner) VALUES (?, ?, ?, ?)",
-            (challenge_id, user_id, score_awarded, int(is_winner))
+            (challenge_id, user_id, score_awarded, is_winner)
         )
         await db.commit()
 
@@ -173,54 +155,18 @@ async def create_contest(
 
 async def update_contest_score(
     contest_id: int, 
-    discord_id: str, 
-    problem_link: str, 
-    points: int
-) -> bool:
-    """
-    Update a user's contest score and add the solved problem to their list.
-    
-    Args:
-        contest_id: The contest ID
-        discord_id: The user's Discord ID
-        problem_link: The link to the solved problem
-        points: Points to add for this problem
-        
-    Returns:
-        True if successful, False otherwise
-    """
+    user_id: int, 
+    score: int, 
+    rank: int
+) -> None:
+    """Update or insert a contest score for a user."""
     async with aiosqlite.connect(DB_PATH) as db:
-        # First get current values
-        cursor = await db.execute(
-            "SELECT score, problem_solved FROM contest_scores WHERE contest_id = ? AND discord_id = ?",
-            (contest_id, discord_id)
-        )
-        row = await cursor.fetchone()
-        
-        if not row:
-            return False
-            
-        current_score = row[0]
-        problem_solved_str = row[1] if row[1] else ""  # Handle None or empty string
-        
-        # Check if problem already solved
-        if problem_solved_str and problem_link in problem_solved_str:
-            return False
-            
-        # Update problem_solved column
-        if problem_solved_str:
-            new_problem_solved = f"{problem_solved_str}, {problem_link}"
-        else:
-            new_problem_solved = problem_link
-            
-        # Update score and problem_solved
-        new_score = current_score + points
+        db.row_factory = aiosqlite.Row
         await db.execute(
-            "UPDATE contest_scores SET score = ?, problem_solved = ? WHERE contest_id = ? AND discord_id = ?",
-            (new_score, new_problem_solved, contest_id, discord_id)
+            "INSERT OR REPLACE INTO contest_scores (contest_id, user_id, score, rank) VALUES (?, ?, ?, ?)",
+            (contest_id, user_id, score, rank)
         )
         await db.commit()
-        return True
 
 
 async def add_score_history(
@@ -386,26 +332,15 @@ async def update_contest_solves_info(contest_id: int, solves_info: Dict) -> None
 async def get_contest_solves_info(contest_id: int) -> Dict:
     """Get solves info for a contest."""
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT solves_info FROM contests WHERE contest_id = ?",
             (contest_id,)
         )
         row = await cursor.fetchone()
-        if not row or not row[0]:
-            return {}
-        try:
+        if row and row[0]:
             return json.loads(row[0])
-        except:
-            return {}
-
-async def update_contest_solves_info(contest_id: int, solves_info: Dict) -> None:
-    """Update solves info for a contest."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE contests SET solves_info = ? WHERE contest_id = ?",
-            (json.dumps(solves_info), contest_id)
-        )
-        await db.commit()
+        return {}
 
 
 async def join_contest(contest_id: int, discord_id: str, codeforces_handle: str) -> None:
@@ -571,21 +506,42 @@ async def update_problems_solved(discord_id: str, session) -> tuple[bool, int]:
         return False, 0
 
 async def get_user_info(discord_id: str, session=None) -> Dict:
+    """Get user information including last updated timestamp."""
+    user = await get_user_by_discord(discord_id)
+    if not user:
+        return {
+            "exists": False,
+            "discord_id": discord_id,
+            "cf_handle": "",
+            "last_updated": 0
+        }
+    
+    # Get last updated timestamp (we'll add this field if needed)
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row  # <-- Add this line
+        db.row_factory = aiosqlite.Row
+        
+        # Check if last_updated column exists
+        cursor = await db.execute("PRAGMA table_info(users)")
+        columns = await cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        if 'last_updated' not in column_names:
+            await db.execute("ALTER TABLE users ADD COLUMN last_updated INTEGER DEFAULT 0")
+            await db.commit()
+        
         cursor = await db.execute(
-            "SELECT discord_id, cf_handle, Number_of_problem_solved FROM users WHERE discord_id = ?",
+            "SELECT last_updated FROM users WHERE discord_id = ?",
             (discord_id,)
         )
         row = await cursor.fetchone()
-        if not row:
-            return {"exists": False}
-        return {
-            "exists": True,
-            "discord_id": row["discord_id"],
-            "cf_handle": row["cf_handle"],
-            "Number_of_problem_solved": row["Number_of_problem_solved"]
-        }
+        last_updated = row['last_updated'] if row else 0
+    
+    return {
+        "exists": True,
+        "discord_id": user['discord_id'],
+        "cf_handle": user['cf_handle'],
+        "last_updated": last_updated
+    }
 
 async def get_user_score(discord_id: str) -> Dict:
     """Get user scoring information."""
@@ -869,86 +825,3 @@ async def add_challenge_history(challenge_id: str, discord_id: str, cf_handle: s
             (challenge_id, discord_id, cf_handle, problem_name, problem_link, finish_time, rank, points, timestamp)
         )
         await db.commit()
-
-async def add_contest_score_entry(contest_id: int, discord_id: str, cf_handle: str, score: int = 0, problem_solved: int = 0) -> None:
-    """Add an entry to contest_scores table."""
-    user_data = await get_user_by_discord(discord_id)
-    if not user_data:
-        raise ValueError(f"User with discord_id {discord_id} not found")
-    user_id = user_data['user_id']
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO contest_scores (contest_id, user_id, cf_handle, problem_solved, score) VALUES (?, ?, ?, ?, ?)",
-            (contest_id, user_id, cf_handle, problem_solved, score)
-        )
-        await db.commit()
-
-async def increment_user_solved_count(discord_id: str) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET Number_of_problem_solved = Number_of_problem_solved + 1 WHERE discord_id = ?",
-            (discord_id,)
-        )
-        await db.commit()
-
-async def migrate_challenges_table() -> None:
-    """Migrate challenges table to new format."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Step 1: Rename old table
-        await db.execute("ALTER TABLE challenges RENAME TO challenges_old")
-        
-        # Step 2: Create new challenges table
-        await db.execute("""
-            CREATE TABLE challenges (
-                challenge_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                problem_link TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Step 3: Copy data from old table to new table
-        await db.execute("""
-            INSERT INTO challenges (challenge_id, problem_link, created_at)
-            SELECT challenge_id, problem_id, created_at FROM challenges_old
-        """)
-        
-        # Step 4: Drop old table
-        await db.execute("DROP TABLE challenges_old")
-        
-        await db.commit()
-
-def store_challenge(challenge_id, problem_link):
-    """Stores a new challenge in the 'challenges' table."""
-    conn = None
-    try:
-        conn = sqlite3.connect('db/db.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO challenges (challenge_id, problem_link, created_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-        ''', (challenge_id, problem_link))
-        conn.commit()
-        print(f"Successfully stored challenge {challenge_id}.")
-    except sqlite3.Error as e:
-        print(f"Database error in store_challenge: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-def add_participant(challenge_id, user_id):
-    """Adds a participant to a specific challenge in the 'challenge_participants' table."""
-    conn = None
-    try:
-        conn = sqlite3.connect('db/db.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO challenge_participants (challenge_id, user_id)
-            VALUES (?, ?)
-        ''', (challenge_id, user_id))
-        conn.commit()
-        print(f"Successfully added user {user_id} to challenge {challenge_id}.")
-    except sqlite3.Error as e:
-        print(f"Database error in add_participant: {e}")
-    finally:
-        if conn:
-            conn.close()

@@ -22,13 +22,13 @@ class ContestCommands(commands.GroupCog, name = "contest"):
     def __init__(self, bot):
         self.bot = bot
         self.active_contests = {}  # To store views for active contests
-        self.check_contests.start()
+        self.contest_loop.start()
 
     def cog_unload(self):
-        self.check_contests.cancel()
+        self.contest_loop.cancel()
 
-    @tasks.loop(seconds=10)  # Check every 10 seconds instead of every minute
-    async def check_contests(self):
+    @tasks.loop(minutes=1)
+    async def contest_loop(self):
         # This loop checks for contests to start or end
         contests = await get_pending_and_active_contests()
 
@@ -65,6 +65,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                 continue
     
     async def start_contest(self, contest_id, contest_name, problems, participant_role):
+        # Update status in DB to prevent restarts
         await update_contest_status(contest_id, 'ACTIVE')
 
         channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
@@ -72,115 +73,28 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             return
 
         self.active_contests[contest_id] = {}
-
-        contest_data = await get_bot_contest(contest_id)
-        duration = contest_data['duration']
-
-        now_unix = int(datetime.now().timestamp())
-        unix_start = contest_data.get('unix_timestamp')
-        if not unix_start:
-            try:
-                start_dt = datetime.fromisoformat(contest_data.get('start_time'))
-                unix_start = int(start_dt.timestamp())
-            except Exception:
-                unix_start = now_unix
-
-        unix_end = unix_start + int(duration) * 60
-
-        starts_at_text = f"<t:{unix_start}:R>"
-        countdown_text = f"<t:{unix_end}:R>"
-
+        
         embed = discord.Embed(
-            title=f"🏆 Contest Started: {contest_name}",
-            description="Get ready to solve problems and climb the leaderboard!",
-            color=discord.Color.blurple()
+            title=f"Contest Started: {contest_name}",
+            description="Solve the problems and check your solutions below.",
+            color=discord.Color.green()
         )
-
-        embed.add_field(
-            name="🕒 Starts At",
-            value=starts_at_text,
-            inline=True
-        )
-
-        embed.add_field(
-            name="⏳ Countdown",
-            value=countdown_text,
-            inline=True
-        )
-
-        problem_list = ""
-        for i, problem in enumerate(problems, start=1):
-            if isinstance(problem, dict):
-                problem_name = problem.get("name", f"Problem {i}")
-                problem_link = problem.get("link", "")
-            else:
-                problem_name = f"Problem {i}"
-                problem_link = problem
-            problem_list += f"**{i}.** [{problem_name}]({problem_link})\n"
-
-        embed.add_field(
-            name="📘 Problems",
-            value=problem_list if problem_list else "No problems added.",
-            inline=False
-        )
-
-        embed.set_footer(text=f"Contest ID: {contest_id} • Good luck! 🚀")
-
+        
         view = discord.ui.View(timeout=None)
-        for i in range(len(problems)):
-            view.add_item(discord.ui.Button(
-                label=f"✅ P{i+1}",
-                style=discord.ButtonStyle.primary,
-                custom_id=f"check_{contest_id}_{i}"
-            ))
+        for i, problem_link in enumerate(problems):
+            embed.add_field(name=f"Problem {i+1}", value=f"[Link]({problem_link})", inline=False)
+            view.add_item(discord.ui.Button(label=f"Check Solved - P{i+1}", style=discord.ButtonStyle.secondary, custom_id=f"check_{contest_id}_{i}"))
 
+        # Always try to get the participant role from the guild where the channel is
         if not participant_role and channel.guild:
             participant_role = channel.guild.get_role(PARTICIPANT_ROLE_ID)
-
-        message = await channel.send(
-            content=f"{participant_role.mention if participant_role else 'Participants'}",
-            embed=embed,
-            view=view
-        )
+        
+        await channel.send(content=f"{participant_role.mention if participant_role else 'Participants'}", embed=embed, view=view)
         print(f"Started contest {contest_id}")
-
-        self.active_contests[contest_id]['message'] = message
-        self.active_contests[contest_id]['unix_end'] = unix_end
-
-        task = asyncio.create_task(self._countdown_task(contest_id, message, unix_end, contest_name, problems))
-        self.active_contests[contest_id]['countdown_task'] = task
-
-        # Get contest data
-        contest_data = await get_bot_contest(contest_id)
-
-        # Create a dummy interaction object if needed (for legacy calls)
-        # If you have access to the original interaction, pass it instead!
-        class DummyInteraction:
-            def __init__(self, bot, guild):
-                self.client = bot
-                self.guild = guild
-
-        # Get the guild object (from channel)
-        guild = channel.guild if channel else None
-        interaction = DummyInteraction(self.bot, guild)
-
-        # Use ContestBuilderView to send the announcement
-        builder_view = ContestBuilderView("unused_interaction_id")  # interaction_id not needed for announcement
-        await builder_view._send_announcement(interaction, contest_data, contest_id)
 
     async def end_contest(self, contest_id, contest_name):
         # Update status in DB
         await update_contest_status(contest_id, 'ENDED')
-
-        # cancel countdown task if exists
-        active = self.active_contests.get(contest_id)
-        if active:
-            task = active.get('countdown_task')
-            if task and not task.done():
-                try:
-                    task.cancel()
-                except Exception:
-                    pass
 
         channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         if channel:
@@ -191,54 +105,44 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             
             if results:
                 embed = discord.Embed(
-                    title=f"🏆 **FINAL RESULTS**: {contest_name.upper()}",
-                    description=f"**📌 Contest ID:** `{contest_id}`\n\n",
+                    title=f"🏆 Final Results: {contest_name}",
+                    description=f"Contest ID: {contest_id}",
                     color=discord.Color.gold()
                 )
-                embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/1828/1828884.png")  # Trophy icon
-
-                # Build leaderboard text
-                top3_text = ""
-                others_text = ""
-
+                
+                results_text = ""
                 for rank, result in enumerate(results, 1):
                     discord_id = result['discord_id']
                     handle = result['codeforces_handle']
                     score = result['score']
                     user = self.bot.get_user(int(discord_id))
                     user_mention = user.mention if user else f"ID: {discord_id}"
-
-                    # Top 3 with medals
+                    
+                    # Add medal emojis for top 3
                     if rank == 1:
                         medal = "🥇"
-                        top3_text += f"**{medal} {user_mention} ({handle}) — {score} pts**\n"
                     elif rank == 2:
                         medal = "🥈"
-                        top3_text += f"**{medal} {user_mention} ({handle}) — {score} pts**\n"
                     elif rank == 3:
                         medal = "🥉"
-                        top3_text += f"**{medal} {user_mention} ({handle}) — {score} pts**\n"
                     else:
-                        others_text += f"`#{rank}` {user_mention} ({handle}) — {score} pts\n"
-
-                if top3_text:
-                    embed.add_field(name="👑 **Top 3**", value=top3_text, inline=False)
-                if others_text:
-                    embed.add_field(name="📊 **Other Participants**", value=others_text, inline=False)
-
-                # Highlight winner separately
+                        medal = f"**{rank}.**"
+                    
+                    results_text += f"{medal} {user_mention} ({handle}) - **{score} points**\n"
+                
+                embed.add_field(name="Leaderboard", value=results_text, inline=False)
+                
+                # Add congratulations message
                 if len(results) > 0:
                     winner = results[0]
                     winner_user = self.bot.get_user(int(winner['discord_id']))
                     winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
                     embed.add_field(
-                        name="🎉 **CHAMPION**",
-                        value=f"🏅 **All hail {winner_mention} with {winner['score']} pts!**",
+                        name="🎉 Congratulations!", 
+                        value=f"Winner: {winner_mention} with {winner['score']} points!", 
                         inline=False
                     )
-
-                embed.set_footer(text="Thanks for participating! 🚀")
-
+                
                 await channel.send(embed=embed)
             else:
                 await channel.send("No participants found for this contest.")
@@ -367,13 +271,13 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         # Format start time using Discord timestamp syntax if unix_timestamp is available
         if contest_data.get('unix_timestamp'):
             unix_timestamp = contest_data['unix_timestamp']
-            start_time_display = f"<t:{unix_timestamp}:R>"
+            start_time_display = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
         else:
             # Fallback to regular format and try to convert to unix timestamp
             try:
                 start_time_dt = datetime.fromisoformat(start_time_str)
                 unix_timestamp = int(start_time_dt.timestamp())
-                start_time_display = f"<t:{unix_timestamp}:R>"
+                start_time_display = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
             except (ValueError, TypeError):
                 start_time_display = "Not set or invalid format"
 
@@ -522,36 +426,6 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             await interaction.followup.send("Notification sent successfully!")
         else:
             await interaction.followup.send(f"Contest channel with ID {ANNOUNCEMENT_CHANNEL_ID} not found.")
-
-    @app_commands.command(name="addproblem", description="Adds a problem to an existing contest.")
-    @app_commands.checks.has_role(MENTOR_ROLE_ID)
-    @app_commands.describe(
-        contest_id="The ID of the contest",
-        problem_link="The link to the problem (Codeforces, AtCoder, etc.)"
-    )
-    async def add_problem_to_contest(self, interaction: discord.Interaction, contest_id: int, problem_link: str):
-        """Adds a problem to an existing contest."""
-        await interaction.response.defer(ephemeral=True)
-
-        # Extract contest_id and problem_index from the URL
-        try:
-            parts = problem_link.strip('/').split('/')
-            if "contest" in parts:
-                contest_index = parts.index("contest")
-                cf_contest_id = parts[contest_index + 1]
-                problem_letter = parts[-1]
-            else:
-                await interaction.followup.send("Unsupported problem URL format.", ephemeral=True)
-                return
-        except (IndexError, ValueError):
-            await interaction.followup.send("Invalid problem link format.", ephemeral=True)
-            return
-
-        # Fetch problem name from Codeforces API
-        problem_name = get_codeforces_problem_name(cf_contest_id, problem_letter)
-        if not problem_name:
-            problem_name = f"Problem {problem_letter}"
-        await update_contest_problems(contest_id, [{"link": problem_link, "name": problem_name}])        # (Assuming you have a function to do this, e.g., update_contest_problems_with_name)        # Store both link and name in your contest's problems list            problem_name = f"Problem {problem_letter}"    await bot.add_cog(ContestCommands(bot))
 
 async def setup(bot):
     await bot.add_cog(ContestCommands(bot))

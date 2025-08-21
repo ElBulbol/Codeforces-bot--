@@ -24,14 +24,10 @@ class ContestBuilder:
     
     def create_contest(self, interaction_id: str) -> Dict:
         """Create a new contest builder session"""
-        start_time_dt = datetime.now() + timedelta(minutes=1)
-        unix_timestamp = int(start_time_dt.timestamp())
         self.contests[interaction_id] = {
             'name': 'Untitled Contest',
-            'duration': 1,
-            'start_time': start_time_dt.isoformat(),
-            'start_minutes': 1,
-            'unix_timestamp': unix_timestamp,
+            'duration': None,
+            'start_time': None,
             'problems': []  # List of dicts with {link, display_name, criteria}
         }
         return self.contests[interaction_id]
@@ -292,16 +288,8 @@ class AddProblemBuilderModal(discord.ui.Modal, title='Add Problem to Contest'):
 
     def _validate_codeforces_link(self, link: str) -> bool:
         """Validate Codeforces problem link format"""
-        patterns = [
-            r'https?://codeforces\.com/problemset/problem/\d+/[A-Z]\d*',
-            r'https?://codeforces\.com/contest/\d+/problem/[A-Z]\d*',
-            r'https?://codeforces\.com/gym/\d+/problem/[A-Z]\d*'
-        ]
-        
-        for pattern in patterns:
-            if re.match(pattern, link):
-                return True
-        return False
+        pattern = r'https?://codeforces\.com/problemset/problem/\d+/[A-Z]\d*'
+        return bool(re.match(pattern, link))
     
     def _extract_problem_code(self, link: str) -> str:
         """Extract problem code from Codeforces link"""
@@ -421,47 +409,32 @@ class ContestBuilderView(discord.ui.View):
             # Use Discord timestamp if available, otherwise fallback to formatted time
             if contest_data.get('unix_timestamp'):
                 unix_timestamp = contest_data['unix_timestamp']
-                starts_at_text = f"<t:{unix_timestamp}:R>"
+                starts_at_text = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
             else:
                 start_time_dt = datetime.fromisoformat(contest_data['start_time'])
                 starts_at_text = start_time_dt.strftime('%d/%m/%Y %H:%M')
-
-            # Fetch start_time from contest_data (which should come from your DB)
-            start_time_str = contest_data.get('start_time')  # ISO format string from DB
-            if start_time_str:
-                try:
-                    start_time_dt = datetime.fromisoformat(start_time_str)
-                    started_at_text = start_time_dt.strftime("%d/%m/%Y %H:%M")
-                except Exception:
-                    started_at_text = start_time_str
-            else:
-                started_at_text = "Unknown"
-
+            
             embed = discord.Embed(
                 title=f"📢 New Contest: {contest_data['name']}",
-                description=(
-                    "A new coding challenge has been scheduled! Sharpen your skills and compete 🚀\n\n"
-                    f"**Contest Started At:** `{started_at_text}`"
-                ),
-                color=discord.Color.gold()
+                description=f"A new contest has been scheduled!\n\n"
+                            f"**Starts at:** {starts_at_text}\n"
+                            f"**Duration:** {contest_data['duration']} minutes\n"
+                            f"**Problems:** {len(contest_data.get('problems', []))}\n"
+                            f"**Participants:** {participant_count}",
+                color=discord.Color.blue()
             )
-
-            embed.add_field(name="🕒 Starts At", value=starts_at_text, inline=True)
-            embed.add_field(name="⏳ Duration", value=f"{contest_data['duration']} mins", inline=True)
-            embed.add_field(name="📘 Problems", value=f"{len(contest_data.get('problems', []))}", inline=True)
-
-            embed.set_footer(text=f"Contest ID: {contest_id} • May the best coder win! 💡")
-
+            embed.set_footer(text=f"Contest ID: {contest_id}")
+            
             view = discord.ui.View(timeout=None)
             view.add_item(discord.ui.Button(
-                label="🔥 Join Contest", 
+                label="Join Contest", 
                 style=discord.ButtonStyle.success, 
                 custom_id=f"join_{contest_id}"
             ))
-
+            
             await announcement_channel.send(
-                content=f"{participant_role.mention if participant_role else 'Participants'}",
-                embed=embed,
+                content=f"{participant_role.mention if participant_role else 'Participants'}", 
+                embed=embed, 
                 view=view
             )
         except Exception as e:
@@ -538,7 +511,7 @@ def create_contest_setup_embed(contest_data: Dict) -> discord.Embed:
         unix_timestamp = contest_data['unix_timestamp']
         # Discord timestamp formats: <t:timestamp:format>
         # F = Full date/time, R = Relative time
-        start_time_text = f"<t:{unix_timestamp}:R>"
+        start_time_text = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
         
         # Add minutes/hours display if available
         if contest_data.get('start_minutes'):
@@ -555,7 +528,7 @@ def create_contest_setup_embed(contest_data: Dict) -> discord.Embed:
     elif contest_data.get('start_time'):
         try:
             start_time_dt = datetime.fromisoformat(contest_data['start_time'])
-            start_time_text = start_time_dt.strftime("%H:%M")
+            start_time_text = start_time_dt.strftime("%d/%m/%Y %H:%M")
         except:
             start_time_text = "Invalid format"
     else:
