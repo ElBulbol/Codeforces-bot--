@@ -9,21 +9,21 @@ different cogs for access control.
 # ============================================================================
 
 # Role Names (string-based roles)
-CP_ROLE_NAME = "staff"
-MOD_ROLE_NAME = "staff"
-AUTH_ROLE_NAME = "staff"
+CP_ROLE_NAME = "CP"
+MOD_ROLE_NAME = "MOD"
+AUTH_ROLE_NAME = "Auth"
 
 # Role IDs (ID-based roles)
-MENTOR_ROLE_ID = 906647154687377448
-PARTICIPANT_ROLE_ID = 906647154687377448
-AUTH_ROLE_ID = 906647154687377448
+MENTOR_ROLE_ID = 1405870294471540807
+PARTICIPANT_ROLE_ID = 1404736993035812934
+AUTH_ROLE_ID = 1405358190400508005
 
 # ============================================================================
 # CHANNEL CONSTANTS
 # ============================================================================
 
 # Contest and announcement channels
-CONTEST_CHANNEL_ID = 637013889439105058  # bot-testing channel (used in roles.py and contest_builder.py)
-CHALLENGE_CHANNEL_ID = 637013889439105058  # bot-testing channel (used in roles.py and contest_builder.py)
-ANNOUNCEMENT_CHANNEL_ID = 637013889439105058  # Same as contest channel (contest_builder.py)
-ANNOUNCEMENT_CHANNEL_ID_ALT = 637013889439105058  # Alternative announcement channel (contest_interactions.py)
+CONTEST_CHANNEL_ID = 1404857696666128405
+CHALLENGE_CHANNEL_ID = 1404857696666128405
+ANNOUNCEMENT_CHANNEL_ID = 1404857696666128405
+ANNOUNCEMENT_CHANNEL_ID_ALT = 1404857696666128405
