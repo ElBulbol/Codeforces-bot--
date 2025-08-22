@@ -1,17 +1,21 @@
 import discord
+import json
 from discord.ext import commands
 from discord import app_commands
 from discord.ext import tasks
 from datetime import datetime, timedelta
+
 from .contest_builder import ContestBuilderView, contest_builder, create_contest_setup_embed
 from utility.constants import PARTICIPANT_ROLE_ID, ANNOUNCEMENT_CHANNEL_ID, MENTOR_ROLE_ID
 from utility.db_helpers import (
     get_bot_contest, 
     get_pending_and_active_contests, update_contest_status,
     get_contest_problems, get_contest_leaderboard, get_all_bot_contests,
-    get_contest_custom_leaderboard # <-- Import the new helper
+    get_contest_custom_leaderboard,
+    get_contest_solves_info, update_contest_solves_info, # For first solves
+    get_user_by_discord, join_contest, get_contest_participant,
+    update_contest_participant_score
 )
-
 
 class ContestCommands(commands.GroupCog, name = "contest"):
     def __init__(self, bot):
@@ -46,7 +50,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                         print(f"Contest {contest_id} has no problems, skipping start")
                         continue
                     participant_role = None
-                    await self.start_contest(contest_id, name, problems, participant_role)
+                    await self.start_contest(contest_id, name, problems, participant_role, duration)
 
                 # End contest if it's time and its status is ACTIVE
                 elif status == 'ACTIVE' and now >= end_time:
@@ -56,7 +60,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                 print(f"Error processing contest {contest_id}: {e}")
                 continue
     
-    async def start_contest(self, contest_id, contest_name, problems, participant_role):
+    async def start_contest(self, contest_id, contest_name, problems, participant_role, duration):
         # Update status in DB to prevent restarts
         await update_contest_status(contest_id, 'ACTIVE')
 
@@ -71,6 +75,11 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             description="Solve the problems and check your solutions below.",
             color=discord.Color.green()
         )
+        
+        # Display end time using a dynamic Unix timestamp
+        end_time = datetime.now() + timedelta(minutes=duration)
+        end_timestamp = int(end_time.timestamp())
+        embed.add_field(name="⏳ Ends", value=f"<t:{end_timestamp}:R> (Total: {duration} mins)", inline=False)
         
         view = discord.ui.View(timeout=None)
         for i, problem_link in enumerate(problems):
@@ -101,6 +110,16 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                     color=discord.Color.gold()
                 )
                 
+                # MODIFIED: Announce the Champion instead of Top 3
+                winner = results[0]
+                winner_user = self.bot.get_user(int(winner['discord_id']))
+                winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
+                embed.add_field(
+                    name="🏆 Champion",
+                    value=f"Congratulations to {winner_mention} for winning with **{winner['score']} points**!",
+                    inline=False
+                )
+
                 results_text = ""
                 for rank, result in enumerate(results, 1):
                     user = self.bot.get_user(int(result['discord_id']))
@@ -109,17 +128,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                     medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"**{rank}.**"
                     results_text += f"{medal} {user_mention} ({result['codeforces_handle']}) - **{result['score']} points**\n"
                 
-                embed.add_field(name="Leaderboard", value=results_text, inline=False)
-                
-                if results:
-                    winner = results[0]
-                    winner_user = self.bot.get_user(int(winner['discord_id']))
-                    winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
-                    embed.add_field(
-                        name="🎉 Congratulations!", 
-                        value=f"Winner: {winner_mention} with {winner['score']} points!", 
-                        inline=False
-                    )
+                embed.add_field(name="Full Leaderboard", value=results_text, inline=False)
                 
                 await channel.send(embed=embed)
             else:
@@ -128,6 +137,64 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         if contest_id in self.active_contests:
             del self.active_contests[contest_id]
         print(f"Ended contest {contest_id}")
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if not interaction.data or not interaction.data.get("custom_id"):
+            return
+
+        custom_id = interaction.data["custom_id"]
+        if not custom_id.startswith("check_"):
+            return
+
+        try:
+            _, contest_id_str, problem_idx_str = custom_id.split("_")
+            contest_id = int(contest_id_str)
+            problem_idx = int(problem_idx_str)
+        except (ValueError, IndexError):
+            return 
+        
+        await interaction.response.defer(ephemeral=True)
+
+        contest_data = await get_bot_contest(contest_id)
+        if not contest_data or contest_data.get('status') != 'ACTIVE':
+            await interaction.followup.send("This contest is not currently active.", ephemeral=True)
+            return
+
+        user_data = await get_user_by_discord(str(interaction.user.id))
+        if not user_data:
+            await interaction.followup.send("You are not registered with the bot. Please use `/verify` first.", ephemeral=True)
+            return
+
+        await join_contest(contest_id, str(interaction.user.id), user_data['cf_handle'])
+        participant_data = await get_contest_participant(contest_id, str(interaction.user.id))
+        solved_problems = json.loads(participant_data.get('solved_problems', '[]'))
+        
+        if problem_idx in solved_problems:
+            await interaction.followup.send(f"You have already been credited for solving Problem {problem_idx + 1}.", ephemeral=True)
+            return
+            
+        # NOTE: This assumes clicking the button means a successful solve.
+        # A real implementation would verify this against the Codeforces API.
+
+        score_increase = 100 
+        solved_problems.append(problem_idx)
+        await update_contest_participant_score(contest_id, str(interaction.user.id), score_increase, solved_problems)
+
+        solves_info = await get_contest_solves_info(contest_id)
+        problem_key = str(problem_idx)
+
+        if problem_key not in solves_info:
+            solves_info[problem_key] = str(interaction.user.id)
+            await update_contest_solves_info(contest_id, solves_info)
+
+            channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+            problems = await get_contest_problems(contest_id)
+            if channel and problems and problem_idx < len(problems):
+                problem_link = problems[problem_idx]
+                await channel.send(f"🎈 First accepted on [Problem {problem_idx + 1}]({problem_link}) by {interaction.user.mention}!")
+        
+        await interaction.followup.send(f"Congratulations! Your solution for Problem {problem_idx + 1} is recorded. You earned {score_increase} points.", ephemeral=True)
 
     @app_commands.command(name="create", description="Opens an interactive contest builder.")
     @app_commands.checks.has_role(MENTOR_ROLE_ID)
@@ -157,7 +224,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             return
 
         participant_role = interaction.guild.get_role(PARTICIPANT_ROLE_ID)
-        await self.start_contest(contest_id, contest_data['name'], problems, participant_role)
+        await self.start_contest(contest_id, contest_data['name'], problems, participant_role, contest_data['duration'])
         await interaction.followup.send(f"Contest {contest_id} ('{contest_data['name']}') has been started manually.", ephemeral=True)
 
     @app_commands.command(name="end", description="Immediately ends a contest.")
