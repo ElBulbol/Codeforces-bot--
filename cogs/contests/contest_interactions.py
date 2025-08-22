@@ -8,7 +8,8 @@ from datetime import datetime
 from utility.constants import ANNOUNCEMENT_CHANNEL_ID
 from utility.db_helpers import (
     get_bot_contest, get_user_by_discord, join_contest, get_contest_participant_count,
-    get_contest_participant, get_contest_problems, update_contest_participant_score
+    get_contest_participant, get_contest_problems, update_contest_participant_score,
+    increment_user_problems_solved
 )
 
 class ContestInteractionHandler:
@@ -162,6 +163,9 @@ class ContestInteractionHandler:
                             contest_id, str(interaction.user.id), points, solved_problems
                         )
                         
+                        # Update user's bot problems solved count (just increment by 1)
+                        await increment_user_problems_solved(str(interaction.user.id))
+                        
                         await interaction.followup.send(
                             f"🎉 Congratulations! You solved problem {problem_index + 1} and earned {points} points!", 
                             ephemeral=True
@@ -182,6 +186,8 @@ class ContestInteractionHandler:
                 f"Error checking solution status: {str(e)}", 
                 ephemeral=True
             )
+
+
 
     async def _update_announcement_with_participant_count(self, interaction: discord.Interaction, contest_data: dict, contest_id: int, participant_count: int):
         """Update the original announcement message with participant count"""

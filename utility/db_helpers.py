@@ -2,6 +2,7 @@ import aiosqlite
 import os
 import json
 from typing import Dict, List, Optional
+from datetime import datetime, timedelta
 
 
 # Global database path
@@ -25,6 +26,8 @@ async def init_db() -> None:
                 user_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 discord_id TEXT UNIQUE NOT NULL,
                 cf_handle TEXT UNIQUE NOT NULL,
+                problems_solved INTEGER DEFAULT 0,
+                last_updated INTEGER DEFAULT 0,
                 verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -34,6 +37,8 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS challenges (
                 challenge_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 problem_id TEXT NOT NULL,
+                problem_name TEXT,
+                problem_link TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -45,13 +50,16 @@ async def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 score_awarded INTEGER DEFAULT 0,
                 is_winner BOOLEAN,
+                finish_time INTEGER,
+                rank INTEGER,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (challenge_id, user_id),
                 FOREIGN KEY (challenge_id) REFERENCES challenges(challenge_id),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
         
-        # Contests table (modified to support bot contests)
+        # Contests table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS contests (
                 contest_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,11 +71,12 @@ async def init_db() -> None:
                 problems TEXT,
                 solves_info TEXT DEFAULT '{}',
                 status TEXT DEFAULT 'PENDING',
-                contest_type TEXT DEFAULT 'codeforces'
+                contest_type TEXT DEFAULT 'codeforces',
+                unix_timestamp INTEGER
             )
         """)
         
-        # Contest Participants table (enhanced)
+        # Contest Participants table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS contest_participants (
                 contest_id INTEGER NOT NULL,
@@ -108,13 +117,13 @@ async def get_user_by_discord(discord_id: str) -> Optional[Dict]:
         return dict(row) if row else None
 
 
-async def create_challenge(problem_id: str) -> int:
+async def create_challenge(problem_id: str, problem_name: str = None, problem_link: str = None) -> int:
     """Create a new challenge and return the challenge_id."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "INSERT INTO challenges (problem_id) VALUES (?)",
-            (problem_id,)
+            "INSERT INTO challenges (problem_id, problem_name, problem_link) VALUES (?, ?, ?)",
+            (problem_id, problem_name, problem_link)
         )
         await db.commit()
         return cursor.lastrowid
@@ -124,14 +133,16 @@ async def add_challenge_participant(
     challenge_id: int, 
     user_id: int, 
     score_awarded: int = 0, 
-    is_winner: bool = False
+    is_winner: bool = False,
+    finish_time: int = None,
+    rank: int = None
 ) -> None:
     """Add a participant to a challenge."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute(
-            "INSERT INTO challenge_participants (challenge_id, user_id, score_awarded, is_winner) VALUES (?, ?, ?, ?)",
-            (challenge_id, user_id, score_awarded, is_winner)
+            "INSERT INTO challenge_participants (challenge_id, user_id, score_awarded, is_winner, finish_time, rank) VALUES (?, ?, ?, ?, ?, ?)",
+            (challenge_id, user_id, score_awarded, is_winner, finish_time, rank)
         )
         await db.commit()
 
@@ -185,7 +196,7 @@ async def add_score_history(
 
 
 async def get_leaderboard(limit: int = 10) -> List[Dict]:
-    """Get leaderboard based on total scores from score history."""
+    """Get leaderboard based on total scores from challenges and contests."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
@@ -193,10 +204,18 @@ async def get_leaderboard(limit: int = 10) -> List[Dict]:
                 u.user_id,
                 u.discord_id,
                 u.cf_handle,
-                COALESCE(SUM(sh.score), 0) as total_score
+                COALESCE(challenge_scores.total_challenge_score, 0) + COALESCE(contest_scores.total_contest_score, 0) as total_score
             FROM users u
-            LEFT JOIN score_history sh ON u.user_id = sh.user_id
-            GROUP BY u.user_id, u.discord_id, u.cf_handle
+            LEFT JOIN (
+                SELECT user_id, SUM(score_awarded) as total_challenge_score
+                FROM challenge_participants
+                GROUP BY user_id
+            ) challenge_scores ON u.user_id = challenge_scores.user_id
+            LEFT JOIN (
+                SELECT user_id, SUM(score) as total_contest_score
+                FROM contest_participants
+                GROUP BY user_id
+            ) contest_scores ON u.user_id = contest_scores.user_id
             ORDER BY total_score DESC
             LIMIT ?
         """, (limit,))
@@ -230,7 +249,7 @@ async def delete_user(discord_id: str = None, cf_handle: str = None) -> bool:
         return cursor.rowcount > 0
 
 
-# Bot contest functions using existing tables
+# Bot contest functions
 async def create_bot_contest(name: str, duration: int, start_time: str, unix_timestamp: int = None) -> int:
     """Create a new bot contest and return the contest_id."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -239,20 +258,10 @@ async def create_bot_contest(name: str, duration: int, start_time: str, unix_tim
         # If unix_timestamp not provided, calculate it from start_time
         if unix_timestamp is None and start_time:
             try:
-                from datetime import datetime
                 start_time_dt = datetime.fromisoformat(start_time)
                 unix_timestamp = int(start_time_dt.timestamp())
             except:
                 unix_timestamp = None
-        
-        # Check if we need to add the unix_timestamp column
-        cursor = await db.execute("PRAGMA table_info(contests)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        if 'unix_timestamp' not in column_names:
-            await db.execute("ALTER TABLE contests ADD COLUMN unix_timestamp INTEGER")
-            await db.commit()
         
         cursor = await db.execute(
             "INSERT INTO contests (name, duration, start_time, unix_timestamp, status, contest_type) VALUES (?, ?, ?, ?, ?, ?)",
@@ -412,6 +421,7 @@ async def get_contest_leaderboard(contest_id: int) -> List[Dict]:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+
 async def get_contest_participant_count(contest_id: int) -> int:
     """Get the number of participants in a contest."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -423,6 +433,7 @@ async def get_contest_participant_count(contest_id: int) -> int:
         row = await cursor.fetchone()
         return row['count'] if row else 0
 
+
 async def get_all_bot_contests() -> List[Dict]:
     """Get all bot contests ordered by start time (newest first)."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -433,11 +444,13 @@ async def get_all_bot_contests() -> List[Dict]:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+
 # Functions for Codeforces functionality
 async def get_cf_handle(discord_id: str) -> Optional[str]:
     """Get Codeforces handle for a Discord user."""
     user = await get_user_by_discord(discord_id)
     return user['cf_handle'] if user else None
+
 
 async def get_all_cf_handles() -> Dict[str, str]:
     """Get all Discord ID to Codeforces handle mappings."""
@@ -447,63 +460,33 @@ async def get_all_cf_handles() -> Dict[str, str]:
         rows = await cursor.fetchall()
         return {row['discord_id']: row['cf_handle'] for row in rows}
 
-async def update_problems_solved(discord_id: str, session) -> tuple[bool, int]:
-    """Update problems solved count for a user using Codeforces API."""
-    import aiohttp
-    
-    # Get user's CF handle
-    user = await get_user_by_discord(discord_id)
-    if not user:
-        return False, 0
-    
-    cf_handle = user['cf_handle']
-    
+
+async def increment_user_problems_solved(discord_id: str):
+    """Increment the user's bot problems solved count by 1"""
     try:
-        # Get user's submissions from Codeforces API
-        url = f"https://codeforces.com/api/user.status?handle={cf_handle}"
-        async with session.get(url) as response:
-            if response.status != 200:
-                return False, 0
-            
-            data = await response.json()
-            if data.get("status") != "OK":
-                return False, 0
+        current_timestamp = int(datetime.now().timestamp())
         
-        # Count unique solved problems
-        solved_problems = set()
-        for submission in data["result"]:
-            if submission.get("verdict") == "OK":
-                problem = submission.get("problem", {})
-                contest_id = problem.get("contestId")
-                index = problem.get("index")
-                if contest_id and index:
-                    solved_problems.add(f"{contest_id}{index}")
-        
-        problems_count = len(solved_problems)
-        
-        # Update the database (we'll add a problems_solved field if needed)
+        # Increment the problems_solved counter by 1
         async with aiosqlite.connect(DB_PATH) as db:
-            # Check if problems_solved column exists
-            cursor = await db.execute("PRAGMA table_info(users)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            
-            if 'problems_solved' not in column_names:
-                await db.execute("ALTER TABLE users ADD COLUMN problems_solved INTEGER DEFAULT 0")
-                await db.commit()
-            
-            # Update the count
             await db.execute(
-                "UPDATE users SET problems_solved = ? WHERE discord_id = ?",
-                (problems_count, discord_id)
+                "UPDATE users SET problems_solved = problems_solved + 1, last_updated = ? WHERE discord_id = ?",
+                (current_timestamp, discord_id)
             )
             await db.commit()
-        
-        return True, problems_count
-        
+            
+            # Get the updated count for logging
+            cursor = await db.execute(
+                "SELECT problems_solved FROM users WHERE discord_id = ?",
+                (discord_id,)
+            )
+            row = await cursor.fetchone()
+            new_count = row[0] if row else 0
+            
+            print(f"Incremented bot problems solved count for user {discord_id}: now {new_count} problems")
+            
     except Exception as e:
-        print(f"Error updating problems solved for {cf_handle}: {e}")
-        return False, 0
+        print(f"Error incrementing problems solved count for user {discord_id}: {e}")
+
 
 async def get_user_info(discord_id: str, session=None) -> Dict:
     """Get user information including last updated timestamp."""
@@ -516,257 +499,136 @@ async def get_user_info(discord_id: str, session=None) -> Dict:
             "last_updated": 0
         }
     
-    # Get last updated timestamp (we'll add this field if needed)
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Check if last_updated column exists
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        if 'last_updated' not in column_names:
-            await db.execute("ALTER TABLE users ADD COLUMN last_updated INTEGER DEFAULT 0")
-            await db.commit()
-        
-        cursor = await db.execute(
-            "SELECT last_updated FROM users WHERE discord_id = ?",
-            (discord_id,)
-        )
-        row = await cursor.fetchone()
-        last_updated = row['last_updated'] if row else 0
-    
     return {
         "exists": True,
         "discord_id": user['discord_id'],
         "cf_handle": user['cf_handle'],
-        "last_updated": last_updated
+        "last_updated": user['last_updated'] or 0
     }
 
+
 async def get_user_score(discord_id: str) -> Dict:
-    """Get user scoring information."""
+    """Get user scoring information calculated from contests and challenges."""
     user = await get_user_by_discord(discord_id)
     if not user:
         return {"exists": False}
     
+    user_id = user['user_id']
+    
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         
-        # Check if scoring columns exist and add them if needed
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        scoring_columns = ['daily_points', 'weekly_points', 'monthly_points', 'overall_points', 'problems_solved', 'last_updated']
-        for col in scoring_columns:
-            if col not in column_names:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
-        await db.commit()
-        
-        # Get the scoring data
+        # Calculate total contest score
         cursor = await db.execute(
-            "SELECT daily_points, weekly_points, monthly_points, overall_points, problems_solved, last_updated FROM users WHERE discord_id = ?",
-            (discord_id,)
+            "SELECT COALESCE(SUM(score), 0) as contest_score FROM contest_participants WHERE user_id = ?",
+            (user_id,)
         )
-        row = await cursor.fetchone()
+        contest_row = await cursor.fetchone()
+        contest_score = contest_row['contest_score'] if contest_row else 0
         
-        if not row:
-            return {"exists": False}
+        # Calculate total challenge score
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(score_awarded), 0) as challenge_score FROM challenge_participants WHERE user_id = ?",
+            (user_id,)
+        )
+        challenge_row = await cursor.fetchone()
+        challenge_score = challenge_row['challenge_score'] if challenge_row else 0
+        
+        total_score = contest_score + challenge_score
         
         return {
             "exists": True,
             "codeforces_name": user['cf_handle'],
-            "daily_points": row['daily_points'] or 0,
-            "weekly_points": row['weekly_points'] or 0,
-            "monthly_points": row['monthly_points'] or 0,
-            "overall_points": row['overall_points'] or 0,
-            "solved_problems": row['problems_solved'] or 0,
-            "last_updated": row['last_updated'] or 0
+            "daily_points": 0,  # Removed - will be calculated dynamically if needed
+            "weekly_points": 0,  # Removed - will be calculated dynamically if needed
+            "monthly_points": 0,  # Removed - will be calculated dynamically if needed
+            "overall_points": total_score,
+            "solved_problems": user['problems_solved'] or 0,
+            "last_updated": user['last_updated'] or 0
         }
+
 
 async def get_custom_leaderboard(category: str, limit: int = 10) -> List[Dict]:
     """Get leaderboard for different scoring categories."""
-    # Map category to column name
-    category_map = {
-        "daily": "daily_points",
-        "weekly": "weekly_points", 
-        "monthly": "monthly_points",
-        "overall": "overall_points",
-        "solved": "problems_solved"
-    }
-    
-    column = category_map.get(category, "overall_points")
-    
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         
-        # Check if the scoring columns exist
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        if column not in column_names:
-            # Add missing columns
-            scoring_columns = ['daily_points', 'weekly_points', 'monthly_points', 'overall_points', 'problems_solved']
-            for col in scoring_columns:
-                if col not in column_names:
-                    await db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
-            await db.commit()
-        
-        # Get the leaderboard
-        cursor = await db.execute(f"""
-            SELECT 
-                discord_id,
-                cf_handle as codeforces_name,
-                {column} as score,
-                ROW_NUMBER() OVER (ORDER BY {column} DESC) as rank
-            FROM users 
-            WHERE {column} > 0
-            ORDER BY {column} DESC 
-            LIMIT ?
-        """, (limit,))
-        
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-# Leaderboard-specific helper functions
-async def get_leaderboard_user(discord_id: str) -> Dict:
-    """Get or create a leaderboard user with scoring fields."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Check if leaderboard columns exist and add them if needed
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        leaderboard_columns = ['daily_score', 'weekly_score', 'monthly_score', 'overall_score']
-        for col in leaderboard_columns:
-            if col not in column_names:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
-        await db.commit()
-        
-        # Get user, create if doesn't exist
-        cursor = await db.execute(
-            "SELECT discord_id, cf_handle, daily_score, weekly_score, monthly_score, overall_score FROM users WHERE discord_id = ?",
-            (discord_id,)
-        )
-        row = await cursor.fetchone()
-        
-        if not row:
-            await db.execute(
-                "INSERT INTO users (discord_id, daily_score, weekly_score, monthly_score, overall_score) VALUES (?, 0, 0, 0, 0)",
-                (discord_id,)
-            )
-            await db.commit()
-            return {
-                "discord_id": discord_id,
-                "cf_handle": None,
-                "daily_score": 0,
-                "weekly_score": 0,
-                "monthly_score": 0,
-                "overall_score": 0
-            }
-        
-        return dict(row)
-
-async def add_leaderboard_points(discord_id: str, points: int, cf_handle: str = None) -> None:
-    """Add points to all leaderboard categories for a user."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Ensure leaderboard columns exist
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        leaderboard_columns = ['daily_score', 'weekly_score', 'monthly_score', 'overall_score']
-        for col in leaderboard_columns:
-            if col not in column_names:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
-        await db.commit()
-        
-        # Check if user exists
-        cursor = await db.execute("SELECT discord_id FROM users WHERE discord_id = ?", (discord_id,))
-        user = await cursor.fetchone()
-        
-        if not user:
-            # Create user with points
-            await db.execute(
-                "INSERT INTO users (discord_id, cf_handle, daily_score, weekly_score, monthly_score, overall_score) VALUES (?, ?, ?, ?, ?, ?)",
-                (discord_id, cf_handle, points, points, points, points)
-            )
+        if category == "solved":
+            # Problems solved leaderboard
+            cursor = await db.execute("""
+                SELECT 
+                    discord_id,
+                    cf_handle as codeforces_name,
+                    problems_solved as score,
+                    ROW_NUMBER() OVER (ORDER BY problems_solved DESC) as rank
+                FROM users 
+                WHERE problems_solved > 0
+                ORDER BY problems_solved DESC 
+                LIMIT ?
+            """, (limit,))
+        elif category in ["daily", "weekly", "monthly"]:
+            # Time-based scoring from contests and challenges
+            now = datetime.now()
+            if category == "daily":
+                time_threshold = now - timedelta(days=1)
+            elif category == "weekly":
+                time_threshold = now - timedelta(days=7)
+            else:  # monthly
+                time_threshold = now - timedelta(days=30)
+            
+            time_threshold_str = time_threshold.isoformat()
+            
+            cursor = await db.execute(f"""
+                SELECT 
+                    u.discord_id,
+                    u.cf_handle as codeforces_name,
+                    COALESCE(recent_contest_scores.score, 0) + COALESCE(recent_challenge_scores.score, 0) as score,
+                    ROW_NUMBER() OVER (ORDER BY (COALESCE(recent_contest_scores.score, 0) + COALESCE(recent_challenge_scores.score, 0)) DESC) as rank
+                FROM users u
+                LEFT JOIN (
+                    SELECT cp.user_id, SUM(cp.score) as score
+                    FROM contest_participants cp
+                    WHERE cp.joined_at >= ?
+                    GROUP BY cp.user_id
+                ) recent_contest_scores ON u.user_id = recent_contest_scores.user_id
+                LEFT JOIN (
+                    SELECT chp.user_id, SUM(chp.score_awarded) as score
+                    FROM challenge_participants chp
+                    JOIN challenges ch ON chp.challenge_id = ch.challenge_id
+                    WHERE ch.created_at >= ?
+                    GROUP BY chp.user_id
+                ) recent_challenge_scores ON u.user_id = recent_challenge_scores.user_id
+                HAVING score > 0
+                ORDER BY score DESC 
+                LIMIT ?
+            """, (time_threshold_str, time_threshold_str, limit))
         else:
-            # Update existing user scores
-            update_query = "UPDATE users SET daily_score = daily_score + ?, weekly_score = weekly_score + ?, monthly_score = monthly_score + ?, overall_score = overall_score + ?"
-            params = [points, points, points, points]
-            
-            if cf_handle:
-                update_query += ", cf_handle = ?"
-                params.append(cf_handle)
-            
-            update_query += " WHERE discord_id = ?"
-            params.append(discord_id)
-            
-            await db.execute(update_query, params)
-        
-        await db.commit()
-
-async def get_leaderboard_by_type(score_type: str, limit: int = 20) -> List[Dict]:
-    """Get leaderboard for a specific score type."""
-    valid_types = ["daily_score", "weekly_score", "monthly_score", "overall_score"]
-    if score_type not in valid_types:
-        score_type = "overall_score"
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Ensure leaderboard columns exist
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = await cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        leaderboard_columns = ['daily_score', 'weekly_score', 'monthly_score', 'overall_score']
-        for col in leaderboard_columns:
-            if col not in column_names:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
-        await db.commit()
-        
-        cursor = await db.execute(f"""
-            SELECT discord_id, {score_type} as score
-            FROM users 
-            WHERE {score_type} > 0 
-            ORDER BY {score_type} DESC 
-            LIMIT ?
-        """, (limit,))
+            # Overall scoring
+            cursor = await db.execute("""
+                SELECT 
+                    u.discord_id,
+                    u.cf_handle as codeforces_name,
+                    COALESCE(contest_scores.score, 0) + COALESCE(challenge_scores.score, 0) as score,
+                    ROW_NUMBER() OVER (ORDER BY (COALESCE(contest_scores.score, 0) + COALESCE(challenge_scores.score, 0)) DESC) as rank
+                FROM users u
+                LEFT JOIN (
+                    SELECT user_id, SUM(score) as score
+                    FROM contest_participants
+                    GROUP BY user_id
+                ) contest_scores ON u.user_id = contest_scores.user_id
+                LEFT JOIN (
+                    SELECT user_id, SUM(score_awarded) as score
+                    FROM challenge_participants
+                    GROUP BY user_id
+                ) challenge_scores ON u.user_id = challenge_scores.user_id
+                HAVING score > 0
+                ORDER BY score DESC 
+                LIMIT ?
+            """, (limit,))
         
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
-async def reset_leaderboard_scores(score_type: str) -> None:
-    """Reset specific leaderboard scores to 0."""
-    valid_types = ["daily_score", "weekly_score", "monthly_score", "overall_score"]
-    if score_type not in valid_types:
-        return
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(f"UPDATE users SET {score_type} = 0", ())
-        await db.commit()
-
-async def get_user_leaderboard_rank(discord_id: str, score_type: str) -> int:
-    """Get user's rank in a specific leaderboard."""
-    valid_types = ["daily_score", "weekly_score", "monthly_score", "overall_score"]
-    if score_type not in valid_types:
-        return 0
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(f"""
-            SELECT COUNT(*) + 1 as rank FROM users 
-            WHERE {score_type} > (SELECT {score_type} FROM users WHERE discord_id = ?)
-        """, (discord_id,))
-        row = await cursor.fetchone()
-        return row['rank'] if row else 0
 
 async def sync_cf_handles_from_file(cf_links_file: str) -> None:
     """Sync Codeforces handles from a JSON file to the database."""
@@ -794,34 +656,79 @@ async def sync_cf_handles_from_file(cf_links_file: str) -> None:
         
         await db.commit()
 
-async def create_challenge_history_table() -> None:
-    """Create challenge history table if it doesn't exist."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS challenge_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                challenge_id TEXT,
-                discord_id TEXT,
-                cf_handle TEXT,
-                problem_name TEXT,
-                problem_link TEXT,
-                finish_time INTEGER,
-                rank INTEGER,
-                points INTEGER,
-                timestamp INTEGER
-            )
-        ''')
-        await db.commit()
 
-async def add_challenge_history(challenge_id: str, discord_id: str, cf_handle: str, 
+async def add_challenge_history(challenge_id: int, discord_id: str, cf_handle: str, 
                                problem_name: str, problem_link: str, finish_time: int, 
-                               rank: int, points: int, timestamp: int) -> None:
-    """Add an entry to challenge history."""
-    await create_challenge_history_table()
+                               rank: int, points: int) -> None:
+    """Add an entry to challenge participants (replaces challenge_history)."""
+    # Get or create user
+    user = await get_user_by_discord(discord_id)
+    if not user:
+        # Create user if doesn't exist
+        user_id = await add_user(discord_id, cf_handle)
+    else:
+        user_id = user['user_id']
+    
+    # Update challenge info if provided
+    if problem_name or problem_link:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE challenges SET problem_name = COALESCE(?, problem_name), problem_link = COALESCE(?, problem_link) WHERE challenge_id = ?",
+                (problem_name, problem_link, challenge_id)
+            )
+            await db.commit()
+    
+    # Add participant record
+    await add_challenge_participant(challenge_id, user_id, points, rank == 1, finish_time, rank)
+
+
+async def get_challenge_history(limit: int = 50) -> List[Dict]:
+    """Get challenge history from challenge_participants joined with other tables."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("""
+            SELECT 
+                c.challenge_id,
+                u.discord_id,
+                u.cf_handle,
+                c.problem_name,
+                c.problem_link,
+                cp.finish_time,
+                cp.rank,
+                cp.score_awarded as points,
+                cp.joined_at as timestamp
+            FROM challenge_participants cp
+            JOIN challenges c ON cp.challenge_id = c.challenge_id
+            JOIN users u ON cp.user_id = u.user_id
+            ORDER BY cp.joined_at DESC
+            LIMIT ?
+        """, (limit,))
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_user_challenge_history(discord_id: str, limit: int = 20) -> List[Dict]:
+    """Get challenge history for a specific user."""
+    user = await get_user_by_discord(discord_id)
+    if not user:
+        return []
     
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO challenge_history (challenge_id, discord_id, cf_handle, problem_name, problem_link, finish_time, rank, points, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (challenge_id, discord_id, cf_handle, problem_name, problem_link, finish_time, rank, points, timestamp)
-        )
-        await db.commit()
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("""
+            SELECT 
+                c.challenge_id,
+                c.problem_name,
+                c.problem_link,
+                cp.finish_time,
+                cp.rank,
+                cp.score_awarded as points,
+                cp.joined_at as timestamp
+            FROM challenge_participants cp
+            JOIN challenges c ON cp.challenge_id = c.challenge_id
+            WHERE cp.user_id = ?
+            ORDER BY cp.joined_at DESC
+            LIMIT ?
+        """, (user['user_id'], limit))
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]

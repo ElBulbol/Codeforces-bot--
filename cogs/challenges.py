@@ -7,14 +7,18 @@ import re
 import asyncio
 import time
 from utility.random_problems import get_random_problem
-from utility.constants import AUTH_ROLE_NAME, AUTH_ROLE_ID, CHALLENGE_CHANNEL_ID
+from utility.constants import CHALLENGE_CHANNEL_ID
 from utility.db_helpers import (
     get_cf_handle,
-    get_user_info,
-    update_problems_solved,
     get_user_score,
     get_custom_leaderboard,
-    get_all_cf_handles
+    get_all_cf_handles,
+    create_challenge,
+    add_challenge_participant,
+    get_user_by_discord,
+    get_challenge_history,
+    get_user_challenge_history,
+    increment_user_problems_solved
 )
 
 
@@ -59,7 +63,7 @@ class Challenges(commands.Cog):
     
     # The _SolveView class for tracking challenges
     class _SolveView(discord.ui.View):
-        def __init__(self, challenge_id, participants, handle_map, contest_id, index, started_ts, bot, cog):
+        def __init__(self, challenge_id, participants, handle_map, contest_id, index, started_ts, bot, cog, problem_name, problem_link):
             super().__init__(timeout=None)  # No timeout for challenge tracking
             self.challenge_id = challenge_id
             self.participants = set(user.id for user in participants)
@@ -69,8 +73,11 @@ class Challenges(commands.Cog):
             self.started_ts = started_ts
             self.bot = bot
             self.cog = cog
+            self.problem_name = problem_name
+            self.problem_link = problem_link
             self.finished = set()
             self.surrendered = set()
+            self.finish_order = []  # Track order of completion
         
         @discord.ui.button(label="Check If Solved", style=discord.ButtonStyle.green)
         async def check_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -99,7 +106,17 @@ class Challenges(commands.Cog):
                     solved = await _cf_check_solved(tmp_session, handle, self.contest_id, self.index, self.started_ts)
             
             if solved:
-                self.finished.add(interaction.user.id)
+                if interaction.user.id not in self.finished:
+                    self.finished.add(interaction.user.id)
+                    self.finish_order.append(interaction.user.id)
+                    
+                    # Calculate rank and points
+                    rank = len(self.finish_order)
+                    points = max(100 - (rank - 1) * 10, 10)  # 100, 90, 80, ..., minimum 10
+                    
+                    # Save to database
+                    await self._save_challenge_result(user_id, rank, points)
+                    
                 if interaction.user.id in self.surrendered:
                     self.surrendered.remove(interaction.user.id)
                 
@@ -121,11 +138,46 @@ class Challenges(commands.Cog):
             self.surrendered.add(interaction.user.id)
             if interaction.user.id in self.finished:
                 self.finished.remove(interaction.user.id)
+                # Remove from finish order if they were there
+                if interaction.user.id in self.finish_order:
+                    self.finish_order.remove(interaction.user.id)
+            
+            # Save surrender to database (0 points, no rank)
+            await self._save_challenge_result(str(interaction.user.id), None, 0, is_surrender=True)
             
             await interaction.followup.send("You have surrendered this challenge.", ephemeral=True)
             
             # Update the message to reflect the current status
             await self._update_status(interaction)
+        
+        async def _save_challenge_result(self, discord_id: str, rank: int = None, points: int = 0, is_surrender: bool = False):
+            """Save challenge result to database"""
+            try:
+                # Get user - don't create if doesn't exist (only authenticated users can participate)
+                user = await get_user_by_discord(discord_id)
+                if not user:
+                    print(f"Warning: User {discord_id} not found in database, skipping challenge result save")
+                    return
+                
+                user_id = user['user_id']
+                
+                # Add challenge participant record
+                finish_time = int(time.time()) if not is_surrender else None
+                await add_challenge_participant(
+                    challenge_id=self.challenge_id,
+                    user_id=user_id,
+                    score_awarded=points,
+                    is_winner=(rank == 1) if rank else False,
+                    finish_time=finish_time,
+                    rank=rank
+                )
+                
+                # If user successfully solved the problem (not surrender), increment their bot problems count
+                if not is_surrender and rank is not None:
+                    await increment_user_problems_solved(discord_id)
+                
+            except Exception as e:
+                print(f"Error saving challenge result: {e}")
         
         async def _update_status(self, interaction):
             # Create an updated embed
@@ -135,18 +187,21 @@ class Challenges(commands.Cog):
                 color=discord.Color.blue()
             )
             
-            # Format the completed users
+            # Format the completed users (in order of completion)
             if self.finished:
                 finished_names = []
-                for user_id in self.finished:
-                    member = interaction.guild.get_member(user_id)
-                    name = member.display_name if member else f"User {user_id}"
-                    handle = self.handle_map.get(str(user_id), "Unknown")
-                    finished_names.append(f"{name} ({handle})")
+                for i, user_id in enumerate(self.finish_order):
+                    if user_id in self.finished:  # Double check they're still in finished set
+                        member = interaction.guild.get_member(user_id)
+                        name = member.display_name if member else f"User {user_id}"
+                        handle = self.handle_map.get(str(user_id), "Unknown")
+                        rank = i + 1
+                        points = max(100 - (rank - 1) * 10, 10)
+                        finished_names.append(f"{rank}. {name} ({handle}) - {points} pts")
                 
                 embed.add_field(
-                    name="Completed",
-                    value=", ".join(finished_names),
+                    name="✅ Completed",
+                    value="\n".join(finished_names) if finished_names else "None",
                     inline=False
                 )
             
@@ -160,32 +215,41 @@ class Challenges(commands.Cog):
                     surrender_names.append(f"{name} ({handle})")
                 
                 embed.add_field(
-                    name="Surrendered",
+                    name="❌ Surrendered",
                     value=", ".join(surrender_names),
                     inline=False
                 )
                 
             # If everyone has finished or surrendered, show completion message
             if self.finished.union(self.surrendered) == self.participants:
-                if self.surrendered:
-                    embed.add_field(
-                        name="Challenge Complete",
-                        value="All participants have completed or surrendered the challenge.",
-                        inline=False
-                    )
+                if self.finished:
+                    winner_id = self.finish_order[0] if self.finish_order else None
+                    if winner_id:
+                        winner = interaction.guild.get_member(winner_id)
+                        winner_name = winner.display_name if winner else f"User {winner_id}"
+                        embed.add_field(
+                            name="🏆 Challenge Complete",
+                            value=f"🎉 Challenge completed! Winner: **{winner_name}**",
+                            inline=False
+                        )
+                    else:
+                        embed.add_field(
+                            name="🏆 Challenge Complete",
+                            value="🎉 Challenge completed!",
+                            inline=False
+                        )
                 else:
                     embed.add_field(
                         name="Challenge Complete",
-                        value="🎉 All participants have successfully solved the problem!",
+                        value="Challenge ended - all participants surrendered.",
                         inline=False
                     )
                 
                 await interaction.channel.send(embed=embed)
     
-    # Challenge command - keep your existing implementation
     @app_commands.command(
         name="challenge", 
-        description="Challenge Auth users to solve a CF problem. Members must be mentioned and have Auth role."
+        description="Challenge users to solve a CF problem. Members must be mentioned and authenticated."
     )
     @app_commands.describe(
         members="Comma-separated list of mentions or IDs to challenge",
@@ -196,6 +260,15 @@ class Challenges(commands.Cog):
         """Challenge users to solve a Codeforces problem"""
         print("Challenge command called!")
         await interaction.response.defer()
+        
+        # Check if the command user is authenticated
+        challenger_user = await get_user_by_discord(str(interaction.user.id))
+        if not challenger_user:
+            await interaction.followup.send(
+                "You need to authenticate with `/authenticate` before creating challenges.",
+                ephemeral=True
+            )
+            return
         
         # Parse mentions (supports comma-separated, space-separated, or both)
         user_ids = set()
@@ -215,33 +288,36 @@ class Challenges(commands.Cog):
             await interaction.followup.send("No valid members were found to challenge.", ephemeral=True)
             return
     
-        # Check for Auth role
-        auth_role = discord.utils.get(interaction.guild.roles, name=AUTH_ROLE_NAME)
-        if not auth_role:
-            # Try by ID if name doesn't work
-            auth_role = interaction.guild.get_role(AUTH_ROLE_ID)
-            if not auth_role:
-                await interaction.followup.send("The 'Auth' role doesn't exist on this server.", ephemeral=True)
-                return
-    
-        # Filter out members without Auth role
-        valid_members = [m for m in challenged_members if auth_role in m.roles]
-        invalid_members = [m for m in challenged_members if m not in valid_members]
-    
-        if not valid_members:
+        # Check which members are authenticated (in the users table)
+        authenticated_members = []
+        unauthenticated_members = []
+        
+        for member in challenged_members:
+            user_data = await get_user_by_discord(str(member.id))
+            if user_data:
+                authenticated_members.append(member)
+            else:
+                unauthenticated_members.append(member)
+        
+        # Handle case where no one is authenticated
+        if not authenticated_members:
             await interaction.followup.send(
-                "None of the mentioned users have the required 'Auth' role.", 
+                "None of the mentioned users are authenticated. Users need to link their Codeforces account with `/authenticate` first.",
                 ephemeral=True
             )
             return
-    
-        if invalid_members:
-            # Notify about ignored members
-            invalid_mentions = ", ".join(m.mention for m in invalid_members)
-            await interaction.followup.send(
-                f"The following users don't have the 'Auth' role and will be ignored: {invalid_mentions}",
-                ephemeral=True
+        
+        # Prepare warning message for unauthenticated users
+        if unauthenticated_members:
+            unauth_mentions = ", ".join(m.mention for m in unauthenticated_members)
+            warning_text = (
+                "The following users will be ignored because they are not authenticated:\n"
+                f"**Not authenticated:** {unauth_mentions}. They must use `/authenticate` to participate."
             )
+            await interaction.followup.send(warning_text, ephemeral=True)
+    
+        # Continue with only authenticated members
+        valid_members = authenticated_members
     
         # Get problem based on rating and tags
         session = getattr(self.bot, "session", None)
@@ -258,19 +334,25 @@ class Challenges(commands.Cog):
             )
             return
     
-        # Create challenge ID
-        challenge_id = f"{int(time.time())}"
+        # Create challenge in database
+        problem_id = f"{problem.get('contestId', 0)}{problem.get('index', '')}"
+        challenge_id = await create_challenge(
+            problem_id=problem_id,
+            problem_name=problem['name'],
+            problem_link=problem['link']
+        )
     
         # Prepare the challenge view
         class ChallengeView(discord.ui.View):
-            def __init__(self, bot, challenge_id, valid_users):
+            def __init__(self, bot, challenge_id, valid_users, problem):
                 super().__init__(timeout=300)  # 5 minute timeout
                 self.bot = bot
                 self.challenge_id = challenge_id
                 self.valid_users = {user.id for user in valid_users}
                 self.accepted_users = set()
                 self.rejected_users = set()
-        
+                self.problem = problem
+            
             async def interaction_check(self, interaction):
                 # Only allow challenged users to interact with buttons
                 if interaction.user.id not in self.valid_users:
@@ -280,7 +362,7 @@ class Challenges(commands.Cog):
                     )
                     return False
                 return True
-        
+            
             @discord.ui.button(label="Accept", style=discord.ButtonStyle.green)
             async def accept_button(self, interaction, button):
                 # Mark user as accepted
@@ -295,10 +377,10 @@ class Challenges(commands.Cog):
             
                 # Acknowledge the button press
                 await interaction.response.send_message(
-                    f"You accepted the challenge to solve {problem['name']}!", 
+                    f"You accepted the challenge to solve {self.problem['name']}!", 
                     ephemeral=True
                 )
-        
+            
             @discord.ui.button(label="Reject", style=discord.ButtonStyle.red)
             async def reject_button(self, interaction, button):
                 # Mark user as rejected
@@ -316,16 +398,16 @@ class Challenges(commands.Cog):
                     "You rejected the challenge.", 
                     ephemeral=True
                 )
-        
+            
             async def _update_message(self, interaction):
                 # Get the original message
                 message = interaction.message
             
                 # Create a new embed with updated information
                 embed = discord.Embed(
-                    title=f"Codeforces Challenge: {problem['name']}",
-                    url=problem['link'],
-                    description=f"Rating: {problem['rating']}\nTags: {', '.join(problem['tags'])}",
+                    title=f"Codeforces Challenge: {self.problem['name']}",
+                    url=self.problem['link'],
+                    description=f"Rating: {self.problem['rating']}\nTags: {', '.join(self.problem['tags'])}",
                     color=discord.Color.blue()
                 )
             
@@ -389,7 +471,7 @@ class Challenges(commands.Cog):
                         await interaction.channel.send(
                             "Challenge canceled - all participants rejected."
                         )
-        
+            
             async def _start_solve_tracking(self, channel, accepted_members):
                 # Create a new message with solve tracking view
                 accepted_ids = [m.id for m in accepted_members]
@@ -406,7 +488,7 @@ class Challenges(commands.Cog):
                         handle_map[str(member.id)] = ""
 
                 # Extract contest ID and problem index from the link
-                parsed = _parse_contest_and_index_from_link(problem["link"])
+                parsed = _parse_contest_and_index_from_link(self.problem["link"])
                 if not parsed:
                     await channel.send("Error parsing problem link. Solve tracking unavailable.")
                     return
@@ -423,12 +505,14 @@ class Challenges(commands.Cog):
                     index=index,
                     started_ts=int(time.time()),
                     bot=self.bot,
-                    cog=self.bot.get_cog("Codeforces")
+                    cog=self.bot.get_cog("Challenges"),
+                    problem_name=self.problem['name'],
+                    problem_link=self.problem['link']
                 )
             
                 embed = discord.Embed(
-                    title=f"Challenge Started: {problem['name']}",
-                    url=problem['link'],
+                    title=f"Challenge Started: {self.problem['name']}",
+                    url=self.problem['link'],
                     description=f"The challenge has begun! Use the buttons below to mark when you're done or to surrender.",
                     color=discord.Color.green()
                 )
@@ -441,13 +525,13 @@ class Challenges(commands.Cog):
             
                 embed.add_field(
                     name="Rating",
-                    value=str(problem['rating']),
+                    value=str(self.problem['rating']),
                     inline=True
                 )
             
                 embed.add_field(
                     name="Tags",
-                    value=", ".join(problem['tags']),
+                    value=", ".join(self.problem['tags']),
                     inline=True
                 )
             
@@ -478,7 +562,7 @@ class Challenges(commands.Cog):
         embed.set_footer(text=f"Challenge ID: {challenge_id} | Initiated by {interaction.user.display_name}")
     
         # Create the view with buttons
-        view = ChallengeView(self.bot, challenge_id, valid_members)
+        view = ChallengeView(self.bot, challenge_id, valid_members, problem)
     
         # Get the specified channel
         challenge_channel = self.bot.get_channel(CHALLENGE_CHANNEL_ID)
@@ -504,7 +588,98 @@ class Challenges(commands.Cog):
                 view=view
             )
 
-    # Add this command to your Codeforces class
+    @app_commands.command(name="challenge_history", description="View recent challenge history")
+    @app_commands.describe(
+        user="View history for a specific user (optional)",
+        limit="Number of challenges to show (default: 10)"
+    )
+    async def challenge_history(self, interaction: discord.Interaction, user: discord.Member = None, limit: int = 10):
+        """View challenge history"""
+        await interaction.response.defer(ephemeral=False)
+        
+        # Validate and cap the limit
+        if limit < 1:
+            limit = 10
+        elif limit > 50:
+            limit = 50
+        
+        if user:
+            # Get history for specific user
+            history_data = await get_user_challenge_history(str(user.id), limit)
+            title = f"🏆 Challenge History for {user.display_name}"
+        else:
+            # Get general challenge history
+            history_data = await get_challenge_history(limit)
+            title = "🏆 Recent Challenge History"
+        
+        if not history_data:
+            await interaction.followup.send(
+                "No challenge history found.",
+                ephemeral=False
+            )
+            return
+        
+        # Create the embed
+        embed = discord.Embed(
+            title=title,
+            color=discord.Color.blue()
+        )
+        
+        # Format history entries
+        entries = []
+        for entry in history_data:
+            if user:
+                # User-specific format
+                rank_str = f"#{entry['rank']}" if entry['rank'] else "Surrendered"
+                points_str = f"{entry['points']} pts" if entry['points'] > 0 else "0 pts"
+                time_str = f"<t:{int(entry['timestamp'].timestamp()) if hasattr(entry['timestamp'], 'timestamp') else entry['timestamp']}:R>"
+                
+                entries.append(f"**{entry['problem_name']}** - {rank_str} ({points_str}) {time_str}")
+            else:
+                # General format - show user info
+                member = interaction.guild.get_member(int(entry['discord_id']))
+                user_name = member.display_name if member else entry['cf_handle']
+                rank_str = f"#{entry['rank']}" if entry['rank'] else "Surrendered"
+                points_str = f"{entry['points']} pts" if entry['points'] > 0 else "0 pts"
+                
+                entries.append(f"**{entry['problem_name']}** - {user_name} {rank_str} ({points_str})")
+        
+        if entries:
+            # Split into multiple fields if too long
+            description = "\n".join(entries)
+            if len(description) <= 4096:
+                embed.description = description
+            else:
+                # Split into multiple fields
+                current_field = ""
+                field_count = 1
+                for entry in entries:
+                    if len(current_field + "\n" + entry) <= 1024:
+                        current_field += "\n" + entry if current_field else entry
+                    else:
+                        embed.add_field(
+                            name=f"History (Part {field_count})",
+                            value=current_field,
+                            inline=False
+                        )
+                        current_field = entry
+                        field_count += 1
+                
+                # Add the last field
+                if current_field:
+                    embed.add_field(
+                        name=f"History (Part {field_count})",
+                        value=current_field,
+                        inline=False
+                    )
+        else:
+            embed.description = "No entries found."
+        
+        # Add timestamp
+        embed.timestamp = discord.utils.utcnow()
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+        
+        await interaction.followup.send(embed=embed)
 
     @commands.command()
     @commands.is_owner()
@@ -512,71 +687,40 @@ class Challenges(commands.Cog):
         """Update problem solved counts for ALL users (owner only)"""
         await ctx.send("Starting update of all users' problem counts...")
         
-        # Get session for API calls
-        session = getattr(self.bot, "session", None)
-        if not session:
-            session = aiohttp.ClientSession()
-            should_close = True
-        else:
-            should_close = False
+        # Get all users
+        all_handles = await get_all_cf_handles()
+        total = len(all_handles)
+        updated = 0
+        failed = 0
         
-        try:
-            # Get all users
-            all_handles = await get_all_cf_handles()
-            
-            total = len(all_handles)
-            updated = 0
-            failed = 0
-            
-            # Update status message
-            status_msg = await ctx.send(f"Updating 0/{total} users...")
-            
-            # Update each user
-            for i, (discord_id, cf_handle) in enumerate(all_handles.items()):
-                print(f"Updating user {i+1}/{total}: {cf_handle}")
-                success, count = await update_problems_solved(discord_id, session)
-                
-                if success:
-                    updated += 1
-                    print(f"Successfully updated {cf_handle}: {count} problems (ALL TIME)")
-                    
-                    # Also update the scoring system
-                    #await update_solved_problems(discord_id, count)
-                else:
-                    failed += 1
-                    print(f"Failed to update {cf_handle}")
-                
-                # Update status every 5 users or at the end
-                if (i + 1) % 5 == 0 or i == total - 1:
-                    await status_msg.edit(content=f"Updating {i+1}/{total} users... ({updated} successful, {failed} failed)")
-                
-                # Avoid rate limiting
-                await asyncio.sleep(1)
-            
-            # Add final summary message
-            await ctx.send(f"✅ Update complete! Updated {updated}/{total} users with ALL-TIME solved problem counts and scoring system data.")
-    
-        except Exception as e:
-            await ctx.send(f"❌ Error during update: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        # Update status message
+        status_msg = await ctx.send(f"Updating 0/{total} users...")
         
-        finally:
-            if should_close:
-                await session.close()
+        # Update each user
+        for i, (discord_id, cf_handle) in enumerate(all_handles.items()):
+            print(f"Updating user {i+1}/{total}: {cf_handle}")
+            try:
+                await increment_user_problems_solved(str(discord_id))
+                updated += 1
+                print(f"Successfully updated {cf_handle}")
+            except Exception as e:
+                failed += 1
+                print(f"Failed to update {cf_handle}: {e}")
+            
+            # Update status every 5 users or at the end
+            if (i + 1) % 5 == 0 or i == total - 1:
+                await status_msg.edit(content=f"Updating {i+1}/{total} users... ({updated} successful, {failed} failed)")
+            
+            # Avoid rate limiting
+            await asyncio.sleep(1)
+        
+        # Add final summary message
+        await ctx.send(f"✅ Update complete! Updated {updated}/{total} users with solved problem counts.")
 
     @app_commands.command(name="update_cf_count", description="Update your Codeforces solved problems count")
     async def update_cf_count(self, interaction: discord.Interaction):
         """Manually update your Codeforces solved problems count"""
         await interaction.response.defer(ephemeral=True)
-        
-        # Get the session for API calls
-        session = getattr(self.bot, "session", None)
-        if not session:
-            session = aiohttp.ClientSession()
-            should_close = True
-        else:
-            should_close = False
         
         try:
             # Check if user has linked CF account
@@ -589,26 +733,18 @@ class Challenges(commands.Cog):
                 return
             
             # Update problems count
-            success, count = await update_problems_solved(str(interaction.user.id), session)
+            await increment_user_problems_solved(str(interaction.user.id))
             
-            if success:
-                # Also update the scoring system
-                #await update_solved_problems(str(interaction.user.id), count)
-                
-                await interaction.followup.send(
-                    f"Successfully updated your solved problems count. You have solved {count} unique problems on Codeforces!\n"
-                    f"Your score in the scoring system has been updated.",
-                    ephemeral=True
-                )
-            else:
-                await interaction.followup.send(
-                    "Failed to update your solved problems count. Please try again later.",
-                    ephemeral=True
-                )
+            await interaction.followup.send(
+                "Successfully updated your bot problems solved count!",
+                ephemeral=True
+            )
     
-        finally:
-            if should_close:
-                await session.close()
+        except Exception as e:
+            await interaction.followup.send(
+                f"Failed to update your solved problems count: {str(e)}",
+                ephemeral=True
+            )
 
     @app_commands.command(name="score", description="View your or another user's scoring information")
     @app_commands.describe(user="The user to check scores for (optional)")
@@ -639,12 +775,10 @@ class Challenges(commands.Cog):
         # Set the user's avatar
         embed.set_thumbnail(url=target_user.display_avatar.url)
         
-        # Add score fields
-        embed.add_field(name="📅 Daily Points", value=str(score_data["daily_points"]), inline=True)
-        embed.add_field(name="📆 Weekly Points", value=str(score_data["weekly_points"]), inline=True)
-        embed.add_field(name="📊 Monthly Points", value=str(score_data["monthly_points"]), inline=True)
+        # Add score fields (note: daily/weekly/monthly points are now calculated dynamically)
         embed.add_field(name="💯 Overall Points", value=str(score_data["overall_points"]), inline=True)
         embed.add_field(name="🧩 Problems Solved", value=str(score_data["solved_problems"]), inline=True)
+        embed.add_field(name="⭐ Contest Score", value="Use `/leaderboard overall` to see ranking", inline=True)
         
         # Add last updated time
         if score_data["last_updated"] > 0:
