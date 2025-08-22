@@ -22,11 +22,6 @@ class Misc(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="init", description="check the connection to the bot")
-    @app_commands.checks.cooldown(1, 5, key = lambda i: (i.user.id))
-    async def hello(self, interaction: discord.Interaction):
-        await interaction.response.send_message(f"I am with you sir{interaction.user.mention} !")
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Misc(bot))

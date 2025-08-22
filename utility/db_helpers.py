@@ -762,3 +762,96 @@ async def get_user_challenge_history(discord_id: str, limit: int = 20) -> List[D
         """, (user['user_id'], limit))
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+async def get_challenge_details(challenge_id: int) -> Optional[Dict]:
+    """Get all details for a specific challenge, including its participants."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # 1. Get main challenge info
+        cursor = await db.execute(
+            "SELECT * FROM challenges WHERE challenge_id = ?",
+            (challenge_id,)
+        )
+        challenge_info = await cursor.fetchone()
+
+        if not challenge_info:
+            return None # Challenge not found
+
+        # 2. Get participant info
+        cursor = await db.execute(
+            """
+            SELECT
+                p.rank,
+                p.score_awarded,
+                p.is_winner,
+                u.discord_id,
+                u.cf_handle
+            FROM challenge_participants p
+            JOIN users u ON p.user_id = u.user_id
+            WHERE p.challenge_id = ?
+            ORDER BY p.rank ASC, p.score_awarded DESC
+            """,
+            (challenge_id,)
+        )
+        participants = await cursor.fetchall()
+
+        return {
+            "challenge": dict(challenge_info),
+            "participants": [dict(row) for row in participants]
+        }
+
+
+async def get_contest_custom_leaderboard(category: str, limit: int = 10) -> List[Dict]:
+    """Get leaderboard based only on contest scores for different time categories."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        if category in ["daily", "weekly", "monthly"]:
+            now = datetime.now()
+            if category == "daily":
+                time_threshold = now - timedelta(days=1)
+            elif category == "weekly":
+                time_threshold = now - timedelta(days=7)
+            else:  # monthly
+                time_threshold = now - timedelta(days=30)
+            
+            time_threshold_str = time_threshold.isoformat()
+            
+            cursor = await db.execute("""
+                SELECT
+                    u.discord_id,
+                    u.cf_handle as codeforces_name,
+                    total_scores.score as score,
+                    ROW_NUMBER() OVER (ORDER BY total_scores.score DESC) as rank
+                FROM (
+                    SELECT user_id, SUM(score) as score
+                    FROM contest_participants
+                    WHERE joined_at >= ?
+                    GROUP BY user_id
+                ) AS total_scores
+                JOIN users u ON u.user_id = total_scores.user_id
+                WHERE total_scores.score > 0
+                ORDER BY total_scores.score DESC
+                LIMIT ?
+            """, (time_threshold_str, limit))
+        else:  # Default to "overall"
+            cursor = await db.execute("""
+                SELECT
+                    u.discord_id,
+                    u.cf_handle as codeforces_name,
+                    total_scores.score as score,
+                    ROW_NUMBER() OVER (ORDER BY total_scores.score DESC) as rank
+                FROM (
+                    SELECT user_id, SUM(score) as score
+                    FROM contest_participants
+                    GROUP BY user_id
+                ) AS total_scores
+                JOIN users u ON u.user_id = total_scores.user_id
+                WHERE total_scores.score > 0
+                ORDER BY total_scores.score DESC
+                LIMIT ?
+            """, (limit,))
+        
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]

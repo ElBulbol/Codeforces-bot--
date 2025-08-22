@@ -4,11 +4,11 @@ from discord import app_commands
 from utility.constants import CP_ROLE_NAME, MOD_ROLE_NAME
 
 
-class Management(commands.Cog):
+class Management(commands.GroupCog, name = "role"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="assign_role", description="Assigns CP role to a member.")
+    @app_commands.command(name="assign", description="Assigns CP role to a member.")
     @app_commands.checks.has_role(MOD_ROLE_NAME)
     @app_commands.checks.cooldown(1, 5, key = lambda i: (i.user.id))
     async def assign_role(self, interaction: discord.Interaction, member: discord.Member):
@@ -21,7 +21,7 @@ class Management(commands.Cog):
         await member.add_roles(cp_role)
         await interaction.response.send_message(f"{member.mention} has been assigned the {CP_ROLE_NAME} role.")
 
-    @app_commands.command(name="remove_role", description="Removes CP role from a member.")
+    @app_commands.command(name="remove", description="Removes CP role from a member.")
     @app_commands.checks.has_role(MOD_ROLE_NAME)
     @app_commands.checks.cooldown(1, 5, key = lambda i: (i.user.id))
     async def remove_role(self, interaction: discord.Interaction, member: discord.Member):

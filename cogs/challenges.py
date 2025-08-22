@@ -1,3 +1,4 @@
+from datetime import datetime
 from discord.ext import commands
 from discord import app_commands
 from typing import Dict, Optional
@@ -9,14 +10,14 @@ from utility.random_problems import get_random_problem
 from utility.constants import CHALLENGE_CHANNEL_ID
 from utility.db_helpers import (
     get_cf_handle,
-    get_user_score,
     get_custom_leaderboard,
     create_challenge,
     add_challenge_participant,
     get_user_by_discord,
     get_challenge_history,
     get_user_challenge_history,
-    increment_user_problems_solved
+    increment_user_problems_solved,
+    get_challenge_details # <-- Import the new helper
 )
 
 
@@ -181,7 +182,7 @@ class Challenges(commands.GroupCog, name = "challenge"):
             # Create an updated embed
             embed = discord.Embed(
                 title="Challenge Status Update",
-                description=f"Challenge ID: {self.challenge_id}",
+                description=f"Challenge ID: `{self.challenge_id}`",
                 color=discord.Color.blue()
             )
             
@@ -405,7 +406,7 @@ class Challenges(commands.GroupCog, name = "challenge"):
                 embed = discord.Embed(
                     title=f"Codeforces Challenge: {self.problem['name']}",
                     url=self.problem['link'],
-                    description=f"Rating: {self.problem['rating']}\nTags: {', '.join(self.problem['tags'])}",
+                    description=f"**ID**: `{self.challenge_id}`\n**Rating**: {self.problem['rating']}\n**Tags**: {', '.join(self.problem['tags'])}",
                     color=discord.Color.blue()
                 )
             
@@ -511,7 +512,7 @@ class Challenges(commands.GroupCog, name = "challenge"):
                 embed = discord.Embed(
                     title=f"Challenge Started: {self.problem['name']}",
                     url=self.problem['link'],
-                    description=f"The challenge has begun! Use the buttons below to mark when you're done or to surrender.",
+                    description=f"The challenge has begun! Challenge ID: `{self.challenge_id}`",
                     color=discord.Color.green()
                 )
             
@@ -539,7 +540,7 @@ class Challenges(commands.GroupCog, name = "challenge"):
         embed = discord.Embed(
             title=f"Codeforces Challenge: {problem['name']}",
             url=problem['link'],
-            description=f"Rating: {problem['rating']}\nTags: {', '.join(problem['tags'])}",
+            description=f"**ID**: `{challenge_id}`\n**Rating**: {problem['rating']}\n**Tags**: {', '.join(problem['tags'])}",
             color=discord.Color.blue()
         )
     
@@ -586,6 +587,61 @@ class Challenges(commands.GroupCog, name = "challenge"):
                 view=view
             )
 
+    @app_commands.command(name="info", description="Get detailed information about a specific challenge.")
+    @app_commands.describe(challenge_id="The ID of the challenge to look up")
+    async def info(self, interaction: discord.Interaction, challenge_id: int):
+        await interaction.response.defer()
+
+        challenge_data = await get_challenge_details(challenge_id) 
+
+        if not challenge_data:
+            await interaction.followup.send(f"❌ Challenge with ID `{challenge_id}` not found.", ephemeral=True)
+            return
+
+        challenge = challenge_data["challenge"]
+        participants = challenge_data["participants"]
+
+        embed = discord.Embed(
+            title=f"Challenge #{challenge['challenge_id']}: {challenge['problem_name']}",
+            url=challenge['problem_link'],
+            color=discord.Color.blue()
+        )
+        
+        # Parse the timestamp string from the database
+        created_at_dt = datetime.fromisoformat(challenge['created_at'])
+        created_at_ts = int(created_at_dt.timestamp())
+
+        embed.add_field(
+            name="Problem Details",
+            value=f"**ID**: `{challenge['challenge_id']}`\n**Created**: <t:{created_at_ts}:F>",
+            inline=False
+        )
+
+        if not participants:
+            embed.add_field(name="Participants", value="No participants found for this challenge.", inline=False)
+        else:
+            participant_lines = []
+            for p in participants:
+                user = interaction.guild.get_member(int(p['discord_id']))
+                user_name = user.mention if user else p['cf_handle']
+                winner_emoji = "🏆" if p['is_winner'] else ""
+                rank = f"#{p['rank']}" if p['rank'] else "N/A"
+                
+                participant_lines.append(
+                    f"`{rank}` {user_name} - **{p['score_awarded']} pts** {winner_emoji}"
+                )
+            
+            embed.add_field(
+                name="Leaderboard",
+                value="\n".join(participant_lines),
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+
+        await interaction.followup.send(embed=embed)
+
     @app_commands.command(name="history", description="View recent challenge history")
     @app_commands.describe(
         user="View history for a specific user (optional)",
@@ -626,13 +682,23 @@ class Challenges(commands.GroupCog, name = "challenge"):
         # Format history entries
         entries = []
         for entry in history_data:
+            timestamp_obj = entry['timestamp']
+            if isinstance(timestamp_obj, str):
+                try:
+                    timestamp_obj = datetime.fromisoformat(timestamp_obj)
+                except ValueError:
+                    timestamp_obj = datetime.strptime(timestamp_obj, '%Y-%m-%d %H:%M:%S')
+
+            time_str = f"<t:{int(timestamp_obj.timestamp())}:R>"
+            
+            challenge_id_str = f"(ID: `{entry['challenge_id']}`)"
+
             if user:
                 # User-specific format
                 rank_str = f"#{entry['rank']}" if entry['rank'] else "Surrendered"
                 points_str = f"{entry['points']} pts" if entry['points'] > 0 else "0 pts"
-                time_str = f"<t:{int(entry['timestamp'].timestamp()) if hasattr(entry['timestamp'], 'timestamp') else entry['timestamp']}:R>"
                 
-                entries.append(f"**{entry['problem_name']}** - {rank_str} ({points_str}) {time_str}")
+                entries.append(f"{challenge_id_str} **[{entry['problem_name']}]({entry['problem_link']})** - {rank_str} ({points_str}) {time_str}")
             else:
                 # General format - show user info
                 member = interaction.guild.get_member(int(entry['discord_id']))
@@ -640,30 +706,27 @@ class Challenges(commands.GroupCog, name = "challenge"):
                 rank_str = f"#{entry['rank']}" if entry['rank'] else "Surrendered"
                 points_str = f"{entry['points']} pts" if entry['points'] > 0 else "0 pts"
                 
-                entries.append(f"**{entry['problem_name']}** - {user_name} {rank_str} ({points_str})")
+                entries.append(f"{challenge_id_str} **[{entry['problem_name']}]({entry['problem_link']})** - {user_name} {rank_str} ({points_str}) {time_str}")
         
         if entries:
-            # Split into multiple fields if too long
             description = "\n".join(entries)
             if len(description) <= 4096:
                 embed.description = description
             else:
-                # Split into multiple fields
                 current_field = ""
                 field_count = 1
-                for entry in entries:
-                    if len(current_field + "\n" + entry) <= 1024:
-                        current_field += "\n" + entry if current_field else entry
+                for entry_text in entries:
+                    if len(current_field + "\n" + entry_text) <= 1024:
+                        current_field += "\n" + entry_text if current_field else entry_text
                     else:
                         embed.add_field(
                             name=f"History (Part {field_count})",
                             value=current_field,
                             inline=False
                         )
-                        current_field = entry
+                        current_field = entry_text
                         field_count += 1
                 
-                # Add the last field
                 if current_field:
                     embed.add_field(
                         name=f"History (Part {field_count})",
@@ -673,7 +736,6 @@ class Challenges(commands.GroupCog, name = "challenge"):
         else:
             embed.description = "No entries found."
         
-        # Add timestamp
         embed.timestamp = discord.utils.utcnow()
         embed.set_footer(text=f"Requested by {interaction.user.display_name}")
         
@@ -694,29 +756,28 @@ class Challenges(commands.GroupCog, name = "challenge"):
     async def leaderboard(
         self, 
         interaction: discord.Interaction, 
-        category: str = "overall",
+        category: app_commands.Choice[str] = None,
         limit: int = 10
     ):
         """View the scoring leaderboard"""
         await interaction.response.defer(ephemeral=False)
         
-        # Validate and cap the limit
         if limit < 1:
             limit = 10
         elif limit > 50:
             limit = 50
         
-        # Get the leaderboard data
-        leaderboard_data = await get_custom_leaderboard(category, limit)
+        category_value = category.value if category else "overall"
+        
+        leaderboard_data = await get_custom_leaderboard(category_value, limit)
         
         if not leaderboard_data:
             await interaction.followup.send(
-                "No users found in the leaderboard. Users need to link their Codeforces accounts with `/authenticate`.",
+                "No users found in this leaderboard category.",
                 ephemeral=False
             )
             return
         
-        # Map category to display name
         category_names = {
             "daily": "Daily Points",
             "weekly": "Weekly Points",
@@ -724,33 +785,25 @@ class Challenges(commands.GroupCog, name = "challenge"):
             "overall": "Overall Points",
             "solved": "Problems Solved"
         }
-        category_display = category_names.get(category, "Overall Points")
+        category_display = category_names.get(category_value, "Overall Points")
         
-        # Create the embed
         embed = discord.Embed(
             title=f"🏆 Challenges Leaderboard ({category_display})",
             description=f"Top {limit} users",
             color=discord.Color.gold()
         )
         
-        # Format leaderboard entries
         entries = []
         for entry in leaderboard_data:
-            # Try to get member object for mention
             user = interaction.guild.get_member(int(entry["discord_id"]))
-            if user:
-                name = user.mention
-            else:
-                name = f"{entry['codeforces_name']}"
-        
-            entries.append(f"{entry['rank']}. {name} - **{entry['score']}**")
+            name = user.mention if user else f"{entry['codeforces_name']}"
+            entries.append(f"#{entry['rank']}: {name} - **{entry['score']}**")
         
         if entries:
             embed.description = "\n".join(entries)
         else:
-            embed.description = "No entries found."
+            embed.description = "No entries found for this category."
         
-        # Add timestamp
         embed.timestamp = discord.utils.utcnow()
         embed.set_footer(text=f"Requested by {interaction.user.display_name}")
         

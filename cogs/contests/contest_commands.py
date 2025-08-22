@@ -8,7 +8,8 @@ from utility.constants import PARTICIPANT_ROLE_ID, ANNOUNCEMENT_CHANNEL_ID, MENT
 from utility.db_helpers import (
     get_bot_contest, 
     get_pending_and_active_contests, update_contest_status,
-    get_contest_problems, get_contest_leaderboard, get_all_bot_contests
+    get_contest_problems, get_contest_leaderboard, get_all_bot_contests,
+    get_contest_custom_leaderboard # <-- Import the new helper
 )
 
 
@@ -37,9 +38,6 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                 start_time = datetime.fromisoformat(start_time_iso)
                 end_time = start_time + timedelta(minutes=duration)
                 now = datetime.now()
-
-                # Debug logging
-                print(f"Contest {contest_id}: status={status}, start_time={start_time}, now={now}, should_start={start_time <= now < end_time}")
 
                 # Start contest if it's time and its status is PENDING
                 if status == 'PENDING' and start_time <= now < end_time:
@@ -79,7 +77,6 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             embed.add_field(name=f"Problem {i+1}", value=f"[Link]({problem_link})", inline=False)
             view.add_item(discord.ui.Button(label=f"Check Solved - P{i+1}", style=discord.ButtonStyle.secondary, custom_id=f"check_{contest_id}_{i}"))
 
-        # Always try to get the participant role from the guild where the channel is
         if not participant_role and channel.guild:
             participant_role = channel.guild.get_role(PARTICIPANT_ROLE_ID)
         
@@ -106,28 +103,15 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                 
                 results_text = ""
                 for rank, result in enumerate(results, 1):
-                    discord_id = result['discord_id']
-                    handle = result['codeforces_handle']
-                    score = result['score']
-                    user = self.bot.get_user(int(discord_id))
-                    user_mention = user.mention if user else f"ID: {discord_id}"
+                    user = self.bot.get_user(int(result['discord_id']))
+                    user_mention = user.mention if user else f"ID: {result['discord_id']}"
                     
-                    # Add medal emojis for top 3
-                    if rank == 1:
-                        medal = "🥇"
-                    elif rank == 2:
-                        medal = "🥈"
-                    elif rank == 3:
-                        medal = "🥉"
-                    else:
-                        medal = f"**{rank}.**"
-                    
-                    results_text += f"{medal} {user_mention} ({handle}) - **{score} points**\n"
+                    medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"**{rank}.**"
+                    results_text += f"{medal} {user_mention} ({result['codeforces_handle']}) - **{result['score']} points**\n"
                 
                 embed.add_field(name="Leaderboard", value=results_text, inline=False)
                 
-                # Add congratulations message
-                if len(results) > 0:
+                if results:
                     winner = results[0]
                     winner_user = self.bot.get_user(int(winner['discord_id']))
                     winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
@@ -148,14 +132,11 @@ class ContestCommands(commands.GroupCog, name = "contest"):
     @app_commands.command(name="create", description="Opens an interactive contest builder.")
     @app_commands.checks.has_role(MENTOR_ROLE_ID)
     async def create_contest(self, interaction: discord.Interaction):
-        """Opens an interactive contest builder interface."""
         interaction_id = f"{interaction.user.id}_{interaction.id}"
         contest_data = contest_builder.create_contest(interaction_id)
     
         embed = create_contest_setup_embed(contest_data)
         view = ContestBuilderView(interaction_id)
-        
-        # Update the select menu options based on current problems
         view._update_remove_select(contest_data)
         
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -164,246 +145,162 @@ class ContestCommands(commands.GroupCog, name = "contest"):
     @app_commands.checks.has_role(MENTOR_ROLE_ID)
     @app_commands.describe(contest_id="The ID of the contest to start.")
     async def start_contest_now(self, interaction: discord.Interaction, contest_id: int):
-        """Manually starts a contest, bypassing the schedule."""
         await interaction.response.defer(ephemeral=True)
-
-        if contest_id in self.active_contests:
-            await interaction.followup.send(f"Contest {contest_id} is already active.", ephemeral=True)
-            return
-
         contest_data = await get_bot_contest(contest_id)
-        if not contest_data:
-            await interaction.followup.send(f"Contest with ID {contest_id} not found.", ephemeral=True)
-            return
-        
-        name = contest_data['name']
-        status = contest_data['status']
-
-        if status == 'ACTIVE':
-            await interaction.followup.send(f"Contest {contest_id} is already active.", ephemeral=True)
-            return
-        if status == 'ENDED':
-            await interaction.followup.send(f"Contest {contest_id} has already ended.", ephemeral=True)
+        if not contest_data or contest_data['status'] != 'PENDING':
+            await interaction.followup.send(f"Contest {contest_id} cannot be started (it may be active, ended, or non-existent).", ephemeral=True)
             return
         
         problems = await get_contest_problems(contest_id)
-
         if not problems:
             await interaction.followup.send(f"Contest {contest_id} has no problems. Please add problems before starting.", ephemeral=True)
             return
 
         participant_role = interaction.guild.get_role(PARTICIPANT_ROLE_ID)
-        await self.start_contest(contest_id, name, problems, participant_role)
-        await interaction.followup.send(f"Contest {contest_id} ('{name}') has been started manually.", ephemeral=True)
+        await self.start_contest(contest_id, contest_data['name'], problems, participant_role)
+        await interaction.followup.send(f"Contest {contest_id} ('{contest_data['name']}') has been started manually.", ephemeral=True)
 
     @app_commands.command(name="end", description="Immediately ends a contest.")
     @app_commands.checks.has_role(MENTOR_ROLE_ID)
     @app_commands.describe(contest_id="The ID of the contest to end.")
     async def end_contest_now(self, interaction: discord.Interaction, contest_id: int):
-        """Manually ends a contest."""
         await interaction.response.defer(ephemeral=True)
-
         contest_data = await get_bot_contest(contest_id)
-        if not contest_data:
-            await interaction.followup.send(f"Contest with ID {contest_id} not found.", ephemeral=True)
-            return
-
-        name = contest_data['name']
-        status = contest_data['status']
-
-        if status != 'ACTIVE':
+        if not contest_data or contest_data['status'] != 'ACTIVE':
             await interaction.followup.send(f"Contest {contest_id} is not currently active.", ephemeral=True)
             return
 
-        await self.end_contest(contest_id, name)
-        await interaction.followup.send(f"Contest {contest_id} ('{name}') has been ended manually.", ephemeral=True)
-
-    @app_commands.command(name="result", description="Display the results of a contest")
-    async def result(self, interaction: discord.Interaction, contest_id: int):
-        """
-        Displays the leaderboard for a specific contest.
-        """
-        results = await get_contest_leaderboard(contest_id)
-
-        if not results:
-            await interaction.response.send_message("No results found for this contest.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title=f"Contest {contest_id} Results",
-            color=discord.Color.gold()
-        )
-
-        description = ""
-        for rank, result in enumerate(results, 1):
-            discord_id = result['discord_id']
-            handle = result['codeforces_handle']
-            score = result['score']
-            user = self.bot.get_user(int(discord_id))
-            user_mention = user.mention if user else f"ID: {discord_id}"
-            description += f"**{rank}.** {user_mention} ({handle}) - **{score} points**\n"
-        
-        embed.description = description
-        await interaction.response.send_message(embed=embed)
+        await self.end_contest(contest_id, contest_data['name'])
+        await interaction.followup.send(f"Contest {contest_id} ('{contest_data['name']}') has been ended manually.", ephemeral=True)
 
     @app_commands.command(name="info", description="Shows information and problems for a specific contest.")
     @app_commands.describe(contest_id="The ID of the contest to show.")
     async def show_contest_info(self, interaction: discord.Interaction, contest_id: int):
-        """Displays all information for a given contest."""
         await interaction.response.defer(ephemeral=True)
-
         contest_data = await get_bot_contest(contest_id)
         if not contest_data:
             await interaction.followup.send(f"No contest found with ID: {contest_id}", ephemeral=True)
             return
 
-        name = contest_data['name']
-        duration = contest_data['duration']
-        start_time_str = contest_data['start_time']
-        status = contest_data['status']
-
-        # Format start time using Discord timestamp syntax if unix_timestamp is available
+        start_time_display = "Not set"
         if contest_data.get('unix_timestamp'):
             unix_timestamp = contest_data['unix_timestamp']
             start_time_display = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
-        else:
-            # Fallback to regular format and try to convert to unix timestamp
-            try:
-                start_time_dt = datetime.fromisoformat(start_time_str)
-                unix_timestamp = int(start_time_dt.timestamp())
-                start_time_display = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
-            except (ValueError, TypeError):
-                start_time_display = "Not set or invalid format"
 
-        # Format problems list for display
         problems_list = await get_contest_problems(contest_id)
         problems_display = "No problems have been added yet."
         if problems_list:
             problems_display = "\n".join([f"{i+1}. [Problem Link]({link})" for i, link in enumerate(problems_list)])
 
-        # Get participants list
         participants = await get_contest_leaderboard(contest_id)
-        participants_display = "No participants yet."
+        leaderboard_display = "No participants yet."
+        winner_display = ""
         if participants:
-            participant_list = []
-            for participant in participants:
-                discord_id = participant['discord_id']
-                handle = participant['codeforces_handle']
-                score = participant['score']
-                user = self.bot.get_user(int(discord_id))
-                user_mention = user.mention if user else f"ID: {discord_id}"
-                participant_list.append(f"• {user_mention} ({handle}) - {score} points")
-            participants_display = "\n".join(participant_list)
+            participant_lines = []
+            for rank, p in enumerate(participants, 1):
+                user = self.bot.get_user(int(p['discord_id']))
+                user_mention = user.mention if user else f"ID: {p['discord_id']}"
+                medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"**{rank}.**"
+                participant_lines.append(f"{medal} {user_mention} ({p['codeforces_handle']}) - **{p['score']} pts**")
+            leaderboard_display = "\n".join(participant_lines)
+            
+            winner = participants[0]
+            winner_user = self.bot.get_user(int(winner['discord_id']))
+            winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
+            winner_display = f"🎉 **Winner**: {winner_mention} with **{winner['score']}** points!"
 
-        embed = discord.Embed(
-            title=f"Contest Info: {name}",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(title=f"Contest Info: {contest_data['name']}", description=winner_display or None, color=discord.Color.blue())
         embed.add_field(name="Contest ID", value=str(contest_id), inline=True)
-        embed.add_field(name="Status", value=status, inline=True)
-        embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
+        embed.add_field(name="Status", value=contest_data['status'], inline=True)
+        embed.add_field(name="Duration", value=f"{contest_data['duration']} minutes", inline=True)
         embed.add_field(name="Start Time", value=start_time_display, inline=False)
         embed.add_field(name="Problems", value=problems_display, inline=False)
-        embed.add_field(name="Participants", value=participants_display, inline=False)
+        embed.add_field(name="🏆 Leaderboard", value=leaderboard_display, inline=False)
         
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="leaderboard", description="View the contest scoring leaderboard.")
+    @app_commands.describe(category="The scoring category to view (defaults to Overall)", limit="Number of users to show (default: 10)")
+    @app_commands.choices(category=[
+        app_commands.Choice(name="Daily Points", value="daily"),
+        app_commands.Choice(name="Weekly Points", value="weekly"),
+        app_commands.Choice(name="Monthly Points", value="monthly"),
+        app_commands.Choice(name="Overall Points", value="overall"),
+    ])
+    async def contest_leaderboard(self, interaction: discord.Interaction, category: app_commands.Choice[str] = None, limit: int = 10):
+        await interaction.response.defer(ephemeral=False)
+        if limit < 1 or limit > 25: limit = 10
+        category_value = category.value if category else "overall"
+
+        leaderboard_data = await get_contest_custom_leaderboard(category_value, limit)
+        if not leaderboard_data:
+            await interaction.followup.send("No contest participants found in this leaderboard category.", ephemeral=True)
+            return
+
+        category_names = {"daily": "Daily Points", "weekly": "Weekly Points", "monthly": "Monthly Points", "overall": "Overall Points"}
+        category_display = category_names.get(category_value, "Overall Points")
+
+        embed = discord.Embed(title=f"🏆 Contest Leaderboard ({category_display})", description=f"Top {limit} participants based on contest scores.", color=discord.Color.gold())
+        
+        entries = []
+        for entry in leaderboard_data:
+            user = self.bot.get_user(int(entry["discord_id"]))
+            name = user.mention if user else f"{entry['codeforces_name']}"
+            entries.append(f"**#{entry['rank']}:** {name} - **{entry['score']}** points")
+        embed.description = "\n".join(entries) if entries else "No entries found for this category."
+
+        embed.timestamp = discord.utils.utcnow()
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="history", description="Shows all past contests with their IDs and dates.")
     async def list_contests(self, interaction: discord.Interaction):
-        """Displays all bot contests with their information."""
         await interaction.response.defer(ephemeral=True)
-
         contests = await get_all_bot_contests()
-        
         if not contests:
             await interaction.followup.send("No contests found.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title="📋 All Contests",
-            description="List of all contests (newest first)",
-            color=discord.Color.purple()
-        )
-
+        embed = discord.Embed(title="📋 All Contests", description="List of all contests (newest first)", color=discord.Color.purple())
         contest_list = []
         for contest in contests:
-            contest_id = contest['contest_id']
-            name = contest['name']
-            status = contest['status']
-            start_time_str = contest['start_time']
-            
-            # Format start time using Discord timestamp syntax if unix_timestamp is available
+            time_display = "Date unknown"
             if contest.get('unix_timestamp'):
-                unix_timestamp = contest['unix_timestamp']
-                time_display = f"<t:{unix_timestamp}:D>"  # Date format
-            else:
-                # Fallback to regular format and try to convert to unix timestamp
-                try:
-                    start_time_dt = datetime.fromisoformat(start_time_str)
-                    unix_timestamp = int(start_time_dt.timestamp())
-                    time_display = f"<t:{unix_timestamp}:D>"
-                except (ValueError, TypeError):
-                    time_display = "Date unknown"
-
-            # Add status emoji
-            if status == 'PENDING':
-                status_emoji = "🟡"
-            elif status == 'ACTIVE':
-                status_emoji = "🟢"
-            elif status == 'ENDED':
-                status_emoji = "🔴"
-            else:
-                status_emoji = "⚪"
-
-            contest_list.append(f"{status_emoji} **#{contest_id}** - {name}\n└ {time_display} • Status: {status}")
-
-        # Split into multiple embeds if too long
-        contest_text = "\n\n".join(contest_list)
-        
-        if len(contest_text) > 4096:  # Discord embed description limit
-            # Split into chunks
-            chunks = []
-            current_chunk = []
-            current_length = 0
+                time_display = f"<t:{contest['unix_timestamp']}:D>"
             
-            for contest_line in contest_list:
-                if current_length + len(contest_line) + 2 > 4096:  # +2 for \n\n
-                    chunks.append("\n\n".join(current_chunk))
-                    current_chunk = [contest_line]
-                    current_length = len(contest_line)
-                else:
-                    current_chunk.append(contest_line)
-                    current_length += len(contest_line) + 2
-            
-            if current_chunk:
-                chunks.append("\n\n".join(current_chunk))
-            
-            # Send first chunk with the main embed
-            embed.description = f"List of all contests (newest first)\n\n{chunks[0]}"
+            status_emoji = {"PENDING": "🟡", "ACTIVE": "🟢", "ENDED": "🔴"}.get(contest['status'], "⚪")
+            contest_list.append(f"{status_emoji} **#{contest['contest_id']}** - {contest['name']}\n└ {time_display} • Status: {contest['status']}")
+
+        # Handle potential overflow of embed description
+        full_text = "\n\n".join(contest_list)
+        if len(full_text) <= 4096:
+            embed.description = full_text
             await interaction.followup.send(embed=embed, ephemeral=True)
-            
-            # Send additional chunks
-            for i, chunk in enumerate(chunks[1:], 2):
-                embed_chunk = discord.Embed(
-                    title=f"📋 All Contests (Page {i})",
-                    description=chunk,
-                    color=discord.Color.purple()
-                )
-                await interaction.followup.send(embed=embed_chunk, ephemeral=True)
         else:
-            embed.description = f"List of all contests (newest first)\n\n{contest_text}"
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            # Simple pagination if text is too long
+            first_page = True
+            current_page_text = ""
+            for line in contest_list:
+                if len(current_page_text) + len(line) + 2 > 4096:
+                    embed.description = current_page_text
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                    embed = discord.Embed(color=discord.Color.purple()) # New embed for next page
+                    current_page_text = line
+                else:
+                    current_page_text += f"\n\n{line}" if current_page_text else line
+            if current_page_text:
+                embed.description = current_page_text
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="notify", description="Sends a notification about a contest.")
     @app_commands.checks.has_role(MENTOR_ROLE_ID)
     @app_commands.describe(message="The message to send to CP members.")
     @app_commands.checks.cooldown(1, 5, key = lambda i: (i.user.id))
     async def contest_notify(self, interaction: discord.Interaction, message: str):
-        """Send a private message to all CP members and mention CP in a specific channel."""
         await interaction.response.defer(ephemeral=True)
-        cp_role = discord.utils.get(interaction.guild.roles, name=PARTICIPANT_ROLE_ID)
+        cp_role = interaction.guild.get_role(PARTICIPANT_ROLE_ID)
         if not cp_role:
-            await interaction.followup.send("CP role not found.")
+            await interaction.followup.send(f"Role with ID {PARTICIPANT_ROLE_ID} not found.")
             return
 
         for member in cp_role.members:
@@ -419,7 +316,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             await channel.send(f"{cp_role.mention} {message}")
             await interaction.followup.send("Notification sent successfully!")
         else:
-            await interaction.followup.send(f"Contest channel with ID {ANNOUNCEMENT_CHANNEL_ID} not found.")
+            await interaction.followup.send(f"Announcement channel with ID {ANNOUNCEMENT_CHANNEL_ID} not found.")
 
 async def setup(bot):
     await bot.add_cog(ContestCommands(bot))
