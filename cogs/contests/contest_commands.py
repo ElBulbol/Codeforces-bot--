@@ -1,5 +1,7 @@
 import discord
 import json
+import aiohttp
+import re
 from discord.ext import commands
 from discord import app_commands
 from discord.ext import tasks
@@ -12,10 +14,239 @@ from utility.db_helpers import (
     get_pending_and_active_contests, update_contest_status,
     get_contest_problems, get_contest_leaderboard, get_all_bot_contests,
     get_contest_custom_leaderboard,
-    get_contest_solves_info, update_contest_solves_info, # For first solves
+    get_contest_solves_info, update_contest_solves_info,
     get_user_by_discord, join_contest, get_contest_participant,
-    update_contest_participant_score
+    update_contest_participant_score, get_contest_participant_count,
+    increment_user_problems_solved
 )
+
+# --- Interaction Handler Class ---
+# Merged from contest_interaction_handler.py
+
+class ContestInteractionHandler:
+    """Handles contest-related interactions like join and check solved buttons"""
+    
+    def __init__(self, bot):
+        self.bot = bot
+    
+    async def handle_join_contest(self, interaction: discord.Interaction, custom_id: str):
+        """Handle join contest button clicks"""
+        try:
+            contest_id = int(custom_id.split('_')[1])
+        except (IndexError, ValueError):
+            await interaction.response.send_message("Invalid contest ID.", ephemeral=True)
+            return
+
+        user_data = await get_user_by_discord(str(interaction.user.id))
+        if not user_data:
+            await interaction.response.send_message(
+                "You need to link your Codeforces account first using `/authenticate` command.",
+                ephemeral=True
+            )
+            return
+
+        contest_data = await get_bot_contest(contest_id)
+        if not contest_data:
+            await interaction.response.send_message("Contest not found.", ephemeral=True)
+            return
+
+        if contest_data['status'] == 'ENDED':
+            await interaction.response.send_message("This contest has already ended.", ephemeral=True)
+            return
+
+        was_already_joined = False
+        try:
+            await join_contest(contest_id, str(interaction.user.id), user_data['cf_handle'])
+            await interaction.response.send_message(
+                f"✅ Successfully joined contest: **{contest_data['name']}**!", 
+                ephemeral=True
+            )
+        except Exception as e:
+            if "UNIQUE constraint failed" in str(e) or "already exists" in str(e).lower():
+                was_already_joined = True
+                await interaction.response.send_message(
+                    "You're already registered for this contest!", 
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Error joining contest: {str(e)}", 
+                    ephemeral=True
+                )
+                return
+
+        if not was_already_joined:
+            try:
+                participant_count = await get_contest_participant_count(contest_id)
+                await self._update_announcement_with_participant_count(interaction, contest_data, contest_id, participant_count)
+            except Exception as e:
+                print(f"Error updating announcement with participant count: {e}")
+
+    async def handle_check_solved(self, interaction: discord.Interaction, custom_id: str):
+        """Handle check solved button clicks with robust API checking and dynamic scoring"""
+        try:
+            parts = custom_id.split('_')
+            contest_id = int(parts[1])
+            problem_index = int(parts[2])
+        except (IndexError, ValueError):
+            await interaction.response.send_message("Invalid button data.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        contest_data = await get_bot_contest(contest_id)
+        if not contest_data or contest_data['status'] != 'ACTIVE':
+            await interaction.followup.send(
+                f"This contest is no longer active (Status: {contest_data.get('status', 'N/A')}).", 
+                ephemeral=True
+            )
+            return
+
+        participant = await get_contest_participant(contest_id, str(interaction.user.id))
+        if not participant:
+            await interaction.followup.send(
+                "You're not registered for this contest! Use the 'Join Contest' button first.", 
+                ephemeral=True
+            )
+            return
+
+        problems = await get_contest_problems(contest_id)
+        if problem_index >= len(problems):
+            await interaction.followup.send("Invalid problem index.", ephemeral=True)
+            return
+
+        problem_link = problems[problem_index]
+        
+        match = re.search(r'/(?:contest|problemset/problem|gym)/(\d+)/problem/([A-Z0-9]+)', problem_link)
+        if not match:
+            await interaction.followup.send("Invalid problem link format. Could not parse contest ID.", ephemeral=True)
+            return
+        cf_contest_id, problem_letter = match.groups()
+
+        try:
+            api_url = f"https://codeforces.com/api/contest.status?contestId={cf_contest_id}&handle={participant['codeforces_handle']}"
+            
+            async with self.bot.session.get(api_url) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send("Error checking Codeforces API. Please try again later.", ephemeral=True)
+                    return
+                
+                data = await resp.json()
+                if data.get('status') != 'OK':
+                    await interaction.followup.send(f"Codeforces API error: {data.get('comment', 'Unknown error')}", ephemeral=True)
+                    return
+
+                solved = False
+                accepted_submission = None
+                for submission in data.get('result', []):
+                    if (submission['problem']['index'] == problem_letter and 
+                        submission['verdict'] == 'OK'):
+                        solved = True
+                        accepted_submission = submission
+                        break
+
+                if solved:
+                    solved_problems = json.loads(participant.get('solved_problems', '[]'))
+                    if problem_index not in solved_problems:
+                        solved_problems.append(problem_index)
+                        
+                        rating = accepted_submission['problem'].get('rating', 0)
+                        points = rating // 100
+                        
+                        if points == 0:
+                            points = 10 # Fallback for unrated problems
+
+                        solves_info = await get_contest_solves_info(contest_id)
+                        problem_key = str(problem_index)
+                        is_first_solve = problem_key not in solves_info
+                        
+                        if is_first_solve:
+                            points += 3 # Add 3 bonus points
+                            solves_info[problem_key] = str(interaction.user.id)
+                            await update_contest_solves_info(contest_id, solves_info)
+                        
+                        feedback_message = f"🎉 Congratulations! You solved problem {problem_index + 1}"
+                        if rating > 0:
+                            feedback_message += f" (Rating: {rating})"
+                        feedback_message += f" and earned {points} points"
+                        if is_first_solve:
+                            feedback_message += " (including a 3 point First Accepted bonus)!"
+                        else:
+                            feedback_message += "!"
+
+                        await update_contest_participant_score(
+                            contest_id, str(interaction.user.id), points, solved_problems
+                        )
+                        await increment_user_problems_solved(str(interaction.user.id))
+                        await interaction.followup.send(feedback_message, ephemeral=True)
+
+                        # Announce first solve publicly
+                        if is_first_solve:
+                            announce_channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+                            if announce_channel:
+                                await announce_channel.send(f"🎈 First accepted on [Problem {problem_index + 1}]({problem_link}) by {interaction.user.mention}!")
+
+                    else:
+                        await interaction.followup.send(
+                            f"You've already been awarded points for problem {problem_index + 1}.", 
+                            ephemeral=True
+                        )
+                else:
+                    await interaction.followup.send(
+                        f"I couldn't find an 'Accepted' submission for this problem. Keep trying! 💪", 
+                        ephemeral=True
+                    )
+        except Exception as e:
+            await interaction.followup.send(f"An error occurred while checking your solution: {str(e)}", ephemeral=True)
+
+    async def _update_announcement_with_participant_count(self, interaction: discord.Interaction, contest_data: dict, contest_id: int, participant_count: int):
+        """Update the original announcement message with participant count"""
+        announcement_channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+        if not announcement_channel:
+            return
+        try:
+            async for message in announcement_channel.history(limit=50):
+                if (message.author == self.bot.user and 
+                    message.embeds and 
+                    message.embeds[0].footer and 
+                    f"Contest ID: {contest_id}" in message.embeds[0].footer.text):
+                    
+                    if contest_data.get('unix_timestamp'):
+                        unix_timestamp = contest_data['unix_timestamp']
+                        starts_at_text = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
+                    else:
+                        start_time_dt = datetime.fromisoformat(contest_data['start_time'])
+                        starts_at_text = start_time_dt.strftime('%d/%m/%Y %H:%M')
+                    
+                    problems_list = await get_contest_problems(contest_id)
+                    problems_count = len(problems_list) if problems_list else 0
+                    
+                    embed = discord.Embed(
+                        title=f"📢 New Contest: {contest_data['name']}",
+                        description=(
+                            f"A new contest has been scheduled!\n\n"
+                            f"**Starts at:** {starts_at_text}\n"
+                            f"**Duration:** {contest_data['duration']} minutes\n"
+                            f"**Problems:** {problems_count}\n"
+                            f"**Participants:** {participant_count}"
+                        ),
+                        color=discord.Color.blue()
+                    )
+                    embed.set_footer(text=f"Contest ID: {contest_id}")
+                    
+                    view = discord.ui.View(timeout=None)
+                    view.add_item(discord.ui.Button(
+                        label="Join Contest", 
+                        style=discord.ButtonStyle.success, 
+                        custom_id=f"join_{contest_id}"
+                    ))
+                    
+                    await message.edit(embed=embed, view=view)
+                    break
+        except Exception as e:
+            print(f"Error updating announcement message: {e}")
+
+# --- Main Slash Command Cog ---
 
 class ContestCommands(commands.GroupCog, name = "contest"):
     def __init__(self, bot):
@@ -28,55 +259,35 @@ class ContestCommands(commands.GroupCog, name = "contest"):
 
     @tasks.loop(minutes=1)
     async def contest_loop(self):
-        # This loop checks for contests to start or end
         contests = await get_pending_and_active_contests()
-
         for contest_data in contests:
-            contest_id = contest_data['contest_id']
-            name = contest_data['name']
-            duration = contest_data['duration']
-            start_time_iso = contest_data['start_time']
-            status = contest_data['status']
-            
             try:
-                start_time = datetime.fromisoformat(start_time_iso)
-                end_time = start_time + timedelta(minutes=duration)
+                start_time = datetime.fromisoformat(contest_data['start_time'])
+                end_time = start_time + timedelta(minutes=contest_data['duration'])
                 now = datetime.now()
 
-                # Start contest if it's time and its status is PENDING
-                if status == 'PENDING' and start_time <= now < end_time:
-                    problems = await get_contest_problems(contest_id)
+                if contest_data['status'] == 'PENDING' and start_time <= now < end_time:
+                    problems = await get_contest_problems(contest_data['contest_id'])
                     if not problems:
-                        print(f"Contest {contest_id} has no problems, skipping start")
+                        print(f"Contest {contest_data['contest_id']} has no problems, skipping start")
                         continue
-                    participant_role = None
-                    await self.start_contest(contest_id, name, problems, participant_role, duration)
+                    await self.start_contest(contest_data['contest_id'], contest_data['name'], problems, None, contest_data['duration'])
 
-                # End contest if it's time and its status is ACTIVE
-                elif status == 'ACTIVE' and now >= end_time:
-                    await self.end_contest(contest_id, name)
-                    
+                elif contest_data['status'] == 'ACTIVE' and now >= end_time:
+                    await self.end_contest(contest_data['contest_id'], contest_data['name'])
             except Exception as e:
-                print(f"Error processing contest {contest_id}: {e}")
+                print(f"Error processing contest {contest_data['contest_id']}: {e}")
                 continue
     
     async def start_contest(self, contest_id, contest_name, problems, participant_role, duration):
-        # Update status in DB to prevent restarts
         await update_contest_status(contest_id, 'ACTIVE')
-
         channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-        if not channel:
-            return
+        if not channel: return
 
         self.active_contests[contest_id] = {}
         
-        embed = discord.Embed(
-            title=f"Contest Started: {contest_name}",
-            description="Solve the problems and check your solutions below.",
-            color=discord.Color.green()
-        )
+        embed = discord.Embed(title=f"Contest Started: {contest_name}", description="Solve the problems and check your solutions below.", color=discord.Color.green())
         
-        # Display end time using a dynamic Unix timestamp
         end_time = datetime.now() + timedelta(minutes=duration)
         end_timestamp = int(end_time.timestamp())
         embed.add_field(name="⏳ Ends", value=f"<t:{end_timestamp}:R> (Total: {duration} mins)", inline=False)
@@ -93,43 +304,28 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         print(f"Started contest {contest_id}")
 
     async def end_contest(self, contest_id, contest_name):
-        # Update status in DB
         await update_contest_status(contest_id, 'ENDED')
-
         channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         if channel:
             await channel.send(f"Contest '{contest_name}' (ID: {contest_id}) has ended! 🏁")
             
-            # Get and display the results
             results = await get_contest_leaderboard(contest_id)
-            
             if results:
-                embed = discord.Embed(
-                    title=f"🏆 Final Results: {contest_name}",
-                    description=f"Contest ID: {contest_id}",
-                    color=discord.Color.gold()
-                )
+                embed = discord.Embed(title=f"🏆 Final Results: {contest_name}", description=f"Contest ID: {contest_id}", color=discord.Color.gold())
                 
-                # MODIFIED: Announce the Champion instead of Top 3
                 winner = results[0]
                 winner_user = self.bot.get_user(int(winner['discord_id']))
                 winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
-                embed.add_field(
-                    name="🏆 Champion",
-                    value=f"Congratulations to {winner_mention} for winning with **{winner['score']} points**!",
-                    inline=False
-                )
+                embed.add_field(name="🏆 Champion", value=f"Congratulations to {winner_mention} for winning with **{winner['score']} points**!", inline=False)
 
                 results_text = ""
                 for rank, result in enumerate(results, 1):
                     user = self.bot.get_user(int(result['discord_id']))
                     user_mention = user.mention if user else f"ID: {result['discord_id']}"
-                    
                     medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"**{rank}.**"
                     results_text += f"{medal} {user_mention} ({result['codeforces_handle']}) - **{result['score']} points**\n"
                 
                 embed.add_field(name="Full Leaderboard", value=results_text, inline=False)
-                
                 await channel.send(embed=embed)
             else:
                 await channel.send("No participants found for this contest.")
@@ -138,74 +334,14 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             del self.active_contests[contest_id]
         print(f"Ended contest {contest_id}")
 
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction):
-        if not interaction.data or not interaction.data.get("custom_id"):
-            return
-
-        custom_id = interaction.data["custom_id"]
-        if not custom_id.startswith("check_"):
-            return
-
-        try:
-            _, contest_id_str, problem_idx_str = custom_id.split("_")
-            contest_id = int(contest_id_str)
-            problem_idx = int(problem_idx_str)
-        except (ValueError, IndexError):
-            return 
-        
-        await interaction.response.defer(ephemeral=True)
-
-        contest_data = await get_bot_contest(contest_id)
-        if not contest_data or contest_data.get('status') != 'ACTIVE':
-            await interaction.followup.send("This contest is not currently active.", ephemeral=True)
-            return
-
-        user_data = await get_user_by_discord(str(interaction.user.id))
-        if not user_data:
-            await interaction.followup.send("You are not registered with the bot. Please use `/verify` first.", ephemeral=True)
-            return
-
-        await join_contest(contest_id, str(interaction.user.id), user_data['cf_handle'])
-        participant_data = await get_contest_participant(contest_id, str(interaction.user.id))
-        solved_problems = json.loads(participant_data.get('solved_problems', '[]'))
-        
-        if problem_idx in solved_problems:
-            await interaction.followup.send(f"You have already been credited for solving Problem {problem_idx + 1}.", ephemeral=True)
-            return
-            
-        # NOTE: This assumes clicking the button means a successful solve.
-        # A real implementation would verify this against the Codeforces API.
-
-        score_increase = 100 
-        solved_problems.append(problem_idx)
-        await update_contest_participant_score(contest_id, str(interaction.user.id), score_increase, solved_problems)
-
-        solves_info = await get_contest_solves_info(contest_id)
-        problem_key = str(problem_idx)
-
-        if problem_key not in solves_info:
-            solves_info[problem_key] = str(interaction.user.id)
-            await update_contest_solves_info(contest_id, solves_info)
-
-            channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-            problems = await get_contest_problems(contest_id)
-            if channel and problems and problem_idx < len(problems):
-                problem_link = problems[problem_idx]
-                await channel.send(f"🎈 First accepted on [Problem {problem_idx + 1}]({problem_link}) by {interaction.user.mention}!")
-        
-        await interaction.followup.send(f"Congratulations! Your solution for Problem {problem_idx + 1} is recorded. You earned {score_increase} points.", ephemeral=True)
-
     @app_commands.command(name="create", description="Opens an interactive contest builder.")
     @app_commands.checks.has_role(MENTOR_ROLE_ID)
     async def create_contest(self, interaction: discord.Interaction):
         interaction_id = f"{interaction.user.id}_{interaction.id}"
         contest_data = contest_builder.create_contest(interaction_id)
-    
         embed = create_contest_setup_embed(contest_data)
         view = ContestBuilderView(interaction_id)
         view._update_remove_select(contest_data)
-        
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="start", description="Immediately starts a contest.")
@@ -215,17 +351,17 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         await interaction.response.defer(ephemeral=True)
         contest_data = await get_bot_contest(contest_id)
         if not contest_data or contest_data['status'] != 'PENDING':
-            await interaction.followup.send(f"Contest {contest_id} cannot be started (it may be active, ended, or non-existent).", ephemeral=True)
+            await interaction.followup.send(f"Contest {contest_id} cannot be started.", ephemeral=True)
             return
         
         problems = await get_contest_problems(contest_id)
         if not problems:
-            await interaction.followup.send(f"Contest {contest_id} has no problems. Please add problems before starting.", ephemeral=True)
+            await interaction.followup.send(f"Contest {contest_id} has no problems.", ephemeral=True)
             return
 
         participant_role = interaction.guild.get_role(PARTICIPANT_ROLE_ID)
         await self.start_contest(contest_id, contest_data['name'], problems, participant_role, contest_data['duration'])
-        await interaction.followup.send(f"Contest {contest_id} ('{contest_data['name']}') has been started manually.", ephemeral=True)
+        await interaction.followup.send(f"Contest '{contest_data['name']}' has been started manually.", ephemeral=True)
 
     @app_commands.command(name="end", description="Immediately ends a contest.")
     @app_commands.checks.has_role(MENTOR_ROLE_ID)
@@ -238,7 +374,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             return
 
         await self.end_contest(contest_id, contest_data['name'])
-        await interaction.followup.send(f"Contest {contest_id} ('{contest_data['name']}') has been ended manually.", ephemeral=True)
+        await interaction.followup.send(f"Contest '{contest_data['name']}' has been ended manually.", ephemeral=True)
 
     @app_commands.command(name="info", description="Shows information and problems for a specific contest.")
     @app_commands.describe(contest_id="The ID of the contest to show.")
@@ -255,9 +391,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             start_time_display = f"<t:{unix_timestamp}:F> (<t:{unix_timestamp}:R>)"
 
         problems_list = await get_contest_problems(contest_id)
-        problems_display = "No problems have been added yet."
-        if problems_list:
-            problems_display = "\n".join([f"{i+1}. [Problem Link]({link})" for i, link in enumerate(problems_list)])
+        problems_display = "\n".join([f"{i+1}. [Problem Link]({link})" for i, link in enumerate(problems_list)]) or "No problems have been added yet."
 
         participants = await get_contest_leaderboard(contest_id)
         leaderboard_display = "No participants yet."
@@ -307,7 +441,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         category_names = {"daily": "Daily Points", "weekly": "Weekly Points", "monthly": "Monthly Points", "overall": "Overall Points"}
         category_display = category_names.get(category_value, "Overall Points")
 
-        embed = discord.Embed(title=f"🏆 Contest Leaderboard ({category_display})", description=f"Top {limit} participants based on contest scores.", color=discord.Color.gold())
+        embed = discord.Embed(title=f"🏆 Contest Leaderboard ({category_display})", color=discord.Color.gold())
         
         entries = []
         for entry in leaderboard_data:
@@ -329,29 +463,24 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             return
 
         embed = discord.Embed(title="📋 All Contests", description="List of all contests (newest first)", color=discord.Color.purple())
-        contest_list = []
-        for contest in contests:
-            time_display = "Date unknown"
-            if contest.get('unix_timestamp'):
-                time_display = f"<t:{contest['unix_timestamp']}:D>"
-            
-            status_emoji = {"PENDING": "🟡", "ACTIVE": "🟢", "ENDED": "🔴"}.get(contest['status'], "⚪")
-            contest_list.append(f"{status_emoji} **#{contest['contest_id']}** - {contest['name']}\n└ {time_display} • Status: {contest['status']}")
+        contest_list = ["{emoji} **#{id}** - {name}\n└ {time} • Status: {status}".format(
+            emoji={"PENDING": "🟡", "ACTIVE": "🟢", "ENDED": "🔴"}.get(c['status'], "⚪"),
+            id=c['contest_id'], name=c['name'],
+            time=f"<t:{c['unix_timestamp']}:D>" if c.get('unix_timestamp') else "Date unknown",
+            status=c['status']
+        ) for c in contests]
 
-        # Handle potential overflow of embed description
         full_text = "\n\n".join(contest_list)
         if len(full_text) <= 4096:
             embed.description = full_text
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            # Simple pagination if text is too long
-            first_page = True
             current_page_text = ""
             for line in contest_list:
                 if len(current_page_text) + len(line) + 2 > 4096:
                     embed.description = current_page_text
                     await interaction.followup.send(embed=embed, ephemeral=True)
-                    embed = discord.Embed(color=discord.Color.purple()) # New embed for next page
+                    embed = discord.Embed(color=discord.Color.purple())
                     current_page_text = line
                 else:
                     current_page_text += f"\n\n{line}" if current_page_text else line
@@ -371,12 +500,9 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             return
 
         for member in cp_role.members:
-            try:
-                await member.send(message)
-            except discord.Forbidden:
-                print(f"Could not send DM to {member.name}")
-            except Exception as e:
-                print(f"An error occurred while sending DM to {member.name}: {e}")
+            try: await member.send(message)
+            except discord.Forbidden: print(f"Could not send DM to {member.name}")
+            except Exception as e: print(f"An error occurred while sending DM to {member.name}: {e}")
 
         channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         if channel:
@@ -385,5 +511,35 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         else:
             await interaction.followup.send(f"Announcement channel with ID {ANNOUNCEMENT_CHANNEL_ID} not found.")
 
+# --- Interaction Listener Cog ---
+
+class ContestInteractions(commands.Cog):
+    """Cog to handle all component interactions for contests"""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.handler = ContestInteractionHandler(bot)
+    
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+            
+        custom_id = interaction.data.get('custom_id', '')
+        
+        if custom_id.startswith('join_'):
+            await self.handler.handle_join_contest(interaction, custom_id)
+        
+        elif custom_id.startswith('check_'):
+            await self.handler.handle_check_solved(interaction, custom_id)
+
+# --- Setup Function ---
+
 async def setup(bot):
+    # Ensure the bot has an aiohttp.ClientSession
+    if not hasattr(bot, 'session'):
+        bot.session = aiohttp.ClientSession()
+    
+    # Add both cogs to the bot
     await bot.add_cog(ContestCommands(bot))
+    await bot.add_cog(ContestInteractions(bot))
