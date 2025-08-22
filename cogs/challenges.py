@@ -4,7 +4,6 @@ from typing import Dict, Optional
 import discord
 import aiohttp
 import re
-import asyncio
 import time
 from utility.random_problems import get_random_problem
 from utility.constants import CHALLENGE_CHANNEL_ID
@@ -12,7 +11,6 @@ from utility.db_helpers import (
     get_cf_handle,
     get_user_score,
     get_custom_leaderboard,
-    get_all_cf_handles,
     create_challenge,
     add_challenge_participant,
     get_user_by_discord,
@@ -57,7 +55,7 @@ async def _cf_check_solved(session: aiohttp.ClientSession, handle: str, contest_
 
 # ---------------- Cog Implementation ---------------- #
 
-class Challenges(commands.Cog):
+class Challenges(commands.GroupCog, name = "challenge"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -248,7 +246,7 @@ class Challenges(commands.Cog):
                 await interaction.channel.send(embed=embed)
     
     @app_commands.command(
-        name="challenge", 
+        name="create", 
         description="Challenge users to solve a CF problem. Members must be mentioned and authenticated."
     )
     @app_commands.describe(
@@ -588,7 +586,7 @@ class Challenges(commands.Cog):
                 view=view
             )
 
-    @app_commands.command(name="challenge_history", description="View recent challenge history")
+    @app_commands.command(name="history", description="View recent challenge history")
     @app_commands.describe(
         user="View history for a specific user (optional)",
         limit="Number of challenges to show (default: 10)"
@@ -681,70 +679,6 @@ class Challenges(commands.Cog):
         
         await interaction.followup.send(embed=embed)
 
-    @commands.command()
-    @commands.is_owner()
-    async def update_all_cf_counts(self, ctx):
-        """Update problem solved counts for ALL users (owner only)"""
-        await ctx.send("Starting update of all users' problem counts...")
-        
-        # Get all users
-        all_handles = await get_all_cf_handles()
-        total = len(all_handles)
-        updated = 0
-        failed = 0
-        
-        # Update status message
-        status_msg = await ctx.send(f"Updating 0/{total} users...")
-        
-        # Update each user
-        for i, (discord_id, cf_handle) in enumerate(all_handles.items()):
-            print(f"Updating user {i+1}/{total}: {cf_handle}")
-            try:
-                await increment_user_problems_solved(str(discord_id))
-                updated += 1
-                print(f"Successfully updated {cf_handle}")
-            except Exception as e:
-                failed += 1
-                print(f"Failed to update {cf_handle}: {e}")
-            
-            # Update status every 5 users or at the end
-            if (i + 1) % 5 == 0 or i == total - 1:
-                await status_msg.edit(content=f"Updating {i+1}/{total} users... ({updated} successful, {failed} failed)")
-            
-            # Avoid rate limiting
-            await asyncio.sleep(1)
-        
-        # Add final summary message
-        await ctx.send(f"✅ Update complete! Updated {updated}/{total} users with solved problem counts.")
-
-    @app_commands.command(name="update_cf_count", description="Update your Codeforces solved problems count")
-    async def update_cf_count(self, interaction: discord.Interaction):
-        """Manually update your Codeforces solved problems count"""
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            # Check if user has linked CF account
-            cf_handle = await get_cf_handle(str(interaction.user.id))
-            if not cf_handle:
-                await interaction.followup.send(
-                    "You haven't linked a Codeforces account yet. Use `/authenticate` to link your account.",
-                    ephemeral=True
-                )
-                return
-            
-            # Update problems count
-            await increment_user_problems_solved(str(interaction.user.id))
-            
-            await interaction.followup.send(
-                "Successfully updated your bot problems solved count!",
-                ephemeral=True
-            )
-    
-        except Exception as e:
-            await interaction.followup.send(
-                f"Failed to update your solved problems count: {str(e)}",
-                ephemeral=True
-            )
 
     @app_commands.command(name="score", description="View your or another user's scoring information")
     @app_commands.describe(user="The user to check scores for (optional)")

@@ -2,23 +2,21 @@ from discord.ext import commands
 from discord import app_commands
 import discord
 import aiohttp
-from utility.db_helpers import get_user_info
+from utility.db_helpers import get_user_score # Use the more comprehensive helper
 
 class CFInfo(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="cf_info", description="Display Codeforces account information")
+    @app_commands.command(name="show_status", description="Display a user's complete competitive status")
     @app_commands.describe(user="The user to get information about (leave empty for your own info)")
-    async def cf_info(self, interaction: discord.Interaction, user: discord.Member = None):
-        """Display Codeforces account information for yourself or another user"""
+    async def show_status(self, interaction: discord.Interaction, user: discord.Member = None):
+        """Display comprehensive Codeforces and server stats for a user."""
         
         await interaction.response.defer(ephemeral=False)
         
-        # Determine which user to check
         target_user = user if user else interaction.user
         
-        # Get the session for API calls
         session = getattr(self.bot, "session", None)
         if not session:
             session = aiohttp.ClientSession()
@@ -27,89 +25,84 @@ class CFInfo(commands.Cog):
             should_close = False
         
         try:
-            # Get user info from database
-            user_info = await get_user_info(str(target_user.id), session)
+            score_data = await get_user_score(str(target_user.id))
             
-            if not user_info["exists"]:
-                if target_user == interaction.user:
-                    message = "You haven't linked a Codeforces account yet. Use `/authenticate` to link your account."
-                    await interaction.followup.send(message, ephemeral=True)
-                else:
-                    message = f"{target_user.mention} hasn't linked a Codeforces account yet."
-                    await interaction.followup.send(message, ephemeral=True)
+            if not score_data.get("exists"):
+                message = f"{target_user.mention} hasn't linked a Codeforces account. Use `/authenticate` to link an account."
+                await interaction.followup.send(message, ephemeral=True)
                 return
             
-            # Get additional info from Codeforces API
-            cf_handle = user_info["cf_handle"]
+            cf_handle = score_data["codeforces_name"]
+            api_data = None
             
-            # Fetch user info
             url = f"https://codeforces.com/api/user.info?handles={cf_handle}"
             try:
                 async with session.get(url) as response:
-                    if response.status != 200:
-                        api_data = None
-                    else:
-                        api_data = await response.json()
-                        if api_data["status"] != "OK":
-                            api_data = None
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get("status") == "OK":
+                            api_data = data
             except Exception as e:
                 print(f"Error fetching CF user info: {e}")
-                api_data = None
-            
-            # Create embed with user information
-            if target_user == interaction.user:
-                title = "Your Codeforces Information"
-                description = "Here's your account information:"
-            else:
-                title = f"{target_user.display_name}'s Codeforces Information"
-                description = "Here's the account information:"
             
             embed = discord.Embed(
-                title=title,
-                description=description,
-                color=discord.Color.blue()
+                title=f"📊 Competitive Status for {target_user.display_name}",
+                color=discord.Color.purple()
             )
+
+            # --- **FIXED THUMBNAIL LOGIC** ---
+            # Default to the user's Discord avatar
+            embed.set_thumbnail(url=target_user.display_avatar.url)
             
-            # Add user avatar
-            embed.set_author(name=target_user.display_name, icon_url=target_user.display_avatar.url)
+            # If API data is available, try to use the Codeforces avatar
+            if api_data and api_data.get("result"):
+                cf_user_api = api_data["result"][0]
+                photo_url_path = cf_user_api.get("titlePhoto")
+
+                # Check if the photo path exists and is not empty
+                if photo_url_path:
+                    # If it's a protocol-relative URL (starts with //), add https:
+                    if photo_url_path.startswith("//"):
+                        full_photo_url = f"https:{photo_url_path}"
+                    # Otherwise, assume it's a full URL
+                    else:
+                        full_photo_url = photo_url_path
+                    
+                    # Set the thumbnail to the correctly formed URL
+                    embed.set_thumbnail(url=full_photo_url)
             
-            # Add basic fields
-            embed.add_field(name="Discord ID", value=user_info["discord_id"], inline=True)
-            embed.add_field(name="Codeforces Handle", value=cf_handle, inline=True)
-            
-            # Add API-based information if available
-            if api_data and "result" in api_data and api_data["result"]:
-                cf_user = api_data["result"][0]
+            embed.add_field(
+                name="Codeforces Profile",
+                value=f"**[{cf_handle}](https://codeforces.com/profile/{cf_handle})**",
+                inline=False
+            )
+
+            if api_data and api_data.get("result"):
+                cf_user_api = api_data["result"][0]
+                rating = cf_user_api.get("rating", "N/A")
+                rank = cf_user_api.get("rank", "Unrated").capitalize()
+                max_rating = cf_user_api.get("maxRating", "N/A")
                 
-                # Add rating and rank
-                rating = cf_user.get("rating", "Unrated")
-                rank = cf_user.get("rank", "Unrated")
-                max_rating = cf_user.get("maxRating", "Unrated")
-                max_rank = cf_user.get("maxRank", "Unrated")
-                
-                embed.add_field(name="Current Rating", value=str(rating), inline=True)
-                embed.add_field(name="Current Rank", value=rank.capitalize() if isinstance(rank, str) else "Unrated", inline=True)
-                embed.add_field(name="Max Rating", value=str(max_rating), inline=True)
-                embed.add_field(name="Max Rank", value=max_rank.capitalize() if isinstance(max_rank, str) else "Unrated", inline=True)
-                
-                # Set thumbnail to user's CF avatar
-                if "titlePhoto" in cf_user:
-                    embed.set_thumbnail(url=cf_user["titlePhoto"])
+                embed.add_field(name="📈 Rating", value=str(rating), inline=True)
+                embed.add_field(name="🎖️ Rank", value=str(rank), inline=True)
+                embed.add_field(name="⭐ Max Rating", value=str(max_rating), inline=True)
             else:
-                # If API data not available, show basic info
-                embed.add_field(name="Rating & Rank", value="Could not fetch from Codeforces API", inline=True)
+                embed.add_field(name="API Status", value="Could not fetch live CF data.", inline=False)
             
-            # Add view with button to profile
-            view = discord.ui.View()
-            view.add_item(
-                discord.ui.Button(
-                    label="View on Codeforces",
-                    url=f"https://codeforces.com/profile/{cf_handle}",
-                    style=discord.ButtonStyle.url
-                )
-            )
+            embed.add_field(name="\u200b", value="**--- Server Stats ---**", inline=False)
+
+            embed.add_field(name="🏆 Overall Points", value=f"**{score_data['overall_points']}**", inline=True)
+            embed.add_field(name="🧩 Problems Solved", value=f"**{score_data['solved_problems']}**", inline=True)
+            embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+            embed.add_field(name="🗓️ Monthly Points", value=str(score_data['monthly_points']), inline=True)
+            embed.add_field(name="📅 Weekly Points", value=str(score_data['weekly_points']), inline=True)
+            embed.add_field(name="☀️ Daily Points", value=str(score_data['daily_points']), inline=True)
+
+            embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+            embed.timestamp = discord.utils.utcnow()
             
-            await interaction.followup.send(embed=embed, view=view)
+            await interaction.followup.send(embed=embed)
     
         finally:
             if should_close:

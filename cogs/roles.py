@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from utility.constants import CP_ROLE_NAME, MOD_ROLE_NAME, CONTEST_CHANNEL_ID
+from utility.constants import CP_ROLE_NAME, MOD_ROLE_NAME
 
 
 class Management(commands.Cog):

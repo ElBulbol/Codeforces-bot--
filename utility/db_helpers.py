@@ -508,7 +508,7 @@ async def get_user_info(discord_id: str, session=None) -> Dict:
 
 
 async def get_user_score(discord_id: str) -> Dict:
-    """Get user scoring information calculated from contests and challenges."""
+    """Get user scoring information including time-based scores."""
     user = await get_user_by_discord(discord_id)
     if not user:
         return {"exists": False}
@@ -518,7 +518,7 @@ async def get_user_score(discord_id: str) -> Dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         
-        # Calculate total contest score
+        # --- Overall Score ---
         cursor = await db.execute(
             "SELECT COALESCE(SUM(score), 0) as contest_score FROM contest_participants WHERE user_id = ?",
             (user_id,)
@@ -526,7 +526,6 @@ async def get_user_score(discord_id: str) -> Dict:
         contest_row = await cursor.fetchone()
         contest_score = contest_row['contest_score'] if contest_row else 0
         
-        # Calculate total challenge score
         cursor = await db.execute(
             "SELECT COALESCE(SUM(score_awarded), 0) as challenge_score FROM challenge_participants WHERE user_id = ?",
             (user_id,)
@@ -535,13 +534,42 @@ async def get_user_score(discord_id: str) -> Dict:
         challenge_score = challenge_row['challenge_score'] if challenge_row else 0
         
         total_score = contest_score + challenge_score
-        
+
+        # --- Time-based Scores ---
+        now = datetime.now()
+        time_thresholds = {
+            "daily": (now - timedelta(days=1)).isoformat(),
+            "weekly": (now - timedelta(days=7)).isoformat(),
+            "monthly": (now - timedelta(days=30)).isoformat()
+        }
+
+        scores = {}
+        for period, threshold in time_thresholds.items():
+            # Contest score for the period
+            cursor = await db.execute(
+                "SELECT COALESCE(SUM(score), 0) as score FROM contest_participants WHERE user_id = ? AND joined_at >= ?",
+                (user_id, threshold)
+            )
+            contest_period_score = (await cursor.fetchone())['score']
+
+            # Challenge score for the period
+            cursor = await db.execute(
+                """SELECT COALESCE(SUM(chp.score_awarded), 0) as score
+                   FROM challenge_participants chp
+                   JOIN challenges ch ON chp.challenge_id = ch.challenge_id
+                   WHERE chp.user_id = ? AND ch.created_at >= ?""",
+                (user_id, threshold)
+            )
+            challenge_period_score = (await cursor.fetchone())['score']
+            
+            scores[f"{period}_points"] = contest_period_score + challenge_period_score
+
         return {
             "exists": True,
             "codeforces_name": user['cf_handle'],
-            "daily_points": 0,  # Removed - will be calculated dynamically if needed
-            "weekly_points": 0,  # Removed - will be calculated dynamically if needed
-            "monthly_points": 0,  # Removed - will be calculated dynamically if needed
+            "daily_points": scores["daily_points"],
+            "weekly_points": scores["weekly_points"],
+            "monthly_points": scores["monthly_points"],
             "overall_points": total_score,
             "solved_problems": user['problems_solved'] or 0,
             "last_updated": user['last_updated'] or 0
@@ -658,8 +686,8 @@ async def sync_cf_handles_from_file(cf_links_file: str) -> None:
 
 
 async def add_challenge_history(challenge_id: int, discord_id: str, cf_handle: str, 
-                               problem_name: str, problem_link: str, finish_time: int, 
-                               rank: int, points: int) -> None:
+                                problem_name: str, problem_link: str, finish_time: int, 
+                                rank: int, points: int) -> None:
     """Add an entry to challenge participants (replaces challenge_history)."""
     # Get or create user
     user = await get_user_by_discord(discord_id)

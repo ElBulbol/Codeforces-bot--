@@ -308,7 +308,7 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="list", description="Shows all past contests with their IDs and dates.")
+    @app_commands.command(name="history", description="Shows all past contests with their IDs and dates.")
     async def list_contests(self, interaction: discord.Interaction):
         """Displays all bot contests with their information."""
         await interaction.response.defer(ephemeral=True)
