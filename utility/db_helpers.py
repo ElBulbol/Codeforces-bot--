@@ -626,11 +626,12 @@ async def get_custom_leaderboard(category: str, limit: int = 10) -> List[Dict]:
                     WHERE ch.created_at >= ?
                     GROUP BY chp.user_id
                 ) recent_challenge_scores ON u.user_id = recent_challenge_scores.user_id
-                HAVING score > 0
+                -- FIXED: Replaced HAVING with WHERE on the calculated score
+                WHERE (COALESCE(recent_contest_scores.score, 0) + COALESCE(recent_challenge_scores.score, 0)) > 0
                 ORDER BY score DESC 
                 LIMIT ?
             """, (time_threshold_str, time_threshold_str, limit))
-        else:
+        else: # "overall"
             # Overall scoring
             cursor = await db.execute("""
                 SELECT 
@@ -649,7 +650,8 @@ async def get_custom_leaderboard(category: str, limit: int = 10) -> List[Dict]:
                     FROM challenge_participants
                     GROUP BY user_id
                 ) challenge_scores ON u.user_id = challenge_scores.user_id
-                HAVING score > 0
+                -- FIXED: Replaced HAVING with WHERE on the calculated score
+                WHERE (COALESCE(contest_scores.score, 0) + COALESCE(challenge_scores.score, 0)) > 0
                 ORDER BY score DESC 
                 LIMIT ?
             """, (limit,))

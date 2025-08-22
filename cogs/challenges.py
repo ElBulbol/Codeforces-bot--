@@ -679,55 +679,6 @@ class Challenges(commands.GroupCog, name = "challenge"):
         
         await interaction.followup.send(embed=embed)
 
-
-    @app_commands.command(name="score", description="View your or another user's scoring information")
-    @app_commands.describe(user="The user to check scores for (optional)")
-    async def score(self, interaction: discord.Interaction, user: discord.Member = None):
-        """View scoring information for yourself or another user"""
-        await interaction.response.defer(ephemeral=False)
-        
-        # Determine which user to check
-        target_user = user if user else interaction.user
-        
-        # Get the score information
-        score_data = await get_user_score(str(target_user.id))
-        
-        if not score_data["exists"]:
-            await interaction.followup.send(
-                f"{target_user.mention} is not in the scoring system. They need to link their Codeforces account with `/authenticate`.",
-                ephemeral=False
-            )
-            return
-        
-        # Create the embed
-        embed = discord.Embed(
-            title=f"🏆 Scoring Information for {target_user.display_name}",
-            description=f"Codeforces Handle: **{score_data['codeforces_name']}**",
-            color=discord.Color.gold()
-        )
-        
-        # Set the user's avatar
-        embed.set_thumbnail(url=target_user.display_avatar.url)
-        
-        # Add score fields (note: daily/weekly/monthly points are now calculated dynamically)
-        embed.add_field(name="💯 Overall Points", value=str(score_data["overall_points"]), inline=True)
-        embed.add_field(name="🧩 Problems Solved", value=str(score_data["solved_problems"]), inline=True)
-        embed.add_field(name="⭐ Contest Score", value="Use `/leaderboard overall` to see ranking", inline=True)
-        
-        # Add last updated time
-        if score_data["last_updated"] > 0:
-            last_updated = f"<t:{score_data['last_updated']}:R>"
-            embed.add_field(name="🔄 Last Updated", value=last_updated, inline=True)
-        
-        # Add link to Codeforces profile
-        embed.add_field(
-            name="Codeforces Profile", 
-            value=f"[View Profile](https://codeforces.com/profile/{score_data['codeforces_name']})",
-            inline=False
-        )
-        
-        await interaction.followup.send(embed=embed)
-
     @app_commands.command(name="leaderboard", description="View the scoring leaderboard")
     @app_commands.describe(
         category="The scoring category to view",
@@ -777,7 +728,7 @@ class Challenges(commands.GroupCog, name = "challenge"):
         
         # Create the embed
         embed = discord.Embed(
-            title=f"🏆 {category_display} Leaderboard",
+            title=f"🏆 Challenges Leaderboard ({category_display})",
             description=f"Top {limit} users",
             color=discord.Color.gold()
         )
