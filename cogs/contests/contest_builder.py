@@ -280,16 +280,23 @@ class AddProblemBuilderModal(discord.ui.Modal, title='Add Problem to Contest'):
         await interaction.edit_original_response(embed=embed, view=view)
 
     def _validate_codeforces_link(self, link: str) -> bool:
-        """Validate Codeforces problem link format"""
-        pattern = r'https?://codeforces\.com/problemset/problem/\d+/[A-Z]\d*'
-        return bool(re.match(pattern, link))
+        """Validate Codeforces problem link format (accepts both /problemset/problem/ and /contest/ links)"""
+        pattern1 = r'https?://codeforces\.com/problemset/problem/\d+/[A-Z]\d*'
+        pattern2 = r'https?://codeforces\.com/contest/\d+/problem/[A-Z]\d*'
+        return bool(re.match(pattern1, link)) or bool(re.match(pattern2, link))
     
     def _extract_problem_code(self, link: str) -> str:
-        """Extract problem code from Codeforces link"""
+        """Extract problem code from Codeforces link (supports both formats)"""
         try:
             parts = link.strip('/').split('/')
-            contest_id = parts[-2]
-            problem_index = parts[-1]
+            if 'problemset' in parts:
+                contest_id = parts[-2]
+                problem_index = parts[-1]
+            elif 'contest' in parts:
+                contest_id = parts[-3]
+                problem_index = parts[-1]
+            else:
+                return "Unknown Problem"
             return f"{contest_id}{problem_index}"
         except:
             return "Unknown Problem"
