@@ -44,7 +44,7 @@ python bot.py
 - `/hello_eyad` – Greet Eyad.
 
 ### Codeforces Commands
-- `/authenticate <handle>` – Link your Discord account to a Codeforces handle.
+- `/link_cf <handle>` – Link your Discord account to a Codeforces handle.
 - `/de_link_cf [user]` – Unlink your Codeforces account (or another user's account if you are a moderator).
 - `/challenge <members> [tags] [rating]` – Challenge users with the `Auth` role to solve a Codeforces problem. Specify tags and rating for the problem or use "random".
 
@@ -72,3 +72,32 @@ python bot.py
 - Welcomes new members via DM.
 - Replies “I agree” if a message contains “eyad m3aras”.
 
+---
+
+## File Structure
+```
+.env
+.gitignore
+bot.py
+cf_links.db
+cf_links.json
+current-request.json
+discord.log
+leaderboard.db
+README.md
+requirements.txt
+temp_contests.db
+cogs/
+    codeforces.py
+    leaderboard.py
+    management.py
+    misc.py
+    temp_contests.py
+```
+
+---
+
+## Notes
+- Ensure the `cf_links.json` file exists to store Codeforces handle links.
+- The bot uses SQLite databases (`leaderboard.db`, `temp_contests.db`) for storing leaderboard and contest data.
+- Logs are stored in `discord.log` for debugging purposes.
