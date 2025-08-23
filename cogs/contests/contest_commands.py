@@ -325,11 +325,14 @@ class ContestCommands(commands.GroupCog, name = "contest"):
                 winner_mention = winner_user.mention if winner_user else f"ID: {winner['discord_id']}"
                 embed.add_field(name="🏆 Champion", value=f"Congratulations to {winner_mention} for winning with **{winner['score']} points**!", inline=False)
 
-                results_text = "\n".join([
-                    f"{'🥇' if r == 1 else '🥈' if r == 2 else '🥉' if r == 3 else f'**{r}.**'} {self.bot.get_user(int(res['discord_id'])).mention if self.bot.get_user(int(res['discord_id'])) else f'ID: {res["discord_id"]}'} ({res['codeforces_handle']}) - **{res['score']} points**"
-                    for r, res in enumerate(results, 1)
-                ])
-                
+                results_text_list = []
+                for r, res in enumerate(results, 1):
+                    medal = "🥇" if r == 1 else "🥈" if r == 2 else "🥉" if r == 3 else f"**{r}.**"
+                    user = self.bot.get_user(int(res['discord_id']))
+                    user_mention = user.mention if user else f"ID: {res['discord_id']}"
+                    line = f"{medal} {user_mention} ({res['codeforces_handle']}) - **{res['score']} points**"
+                    results_text_list.append(line)
+                results_text = "\n".join(results_text_list)
                 embed.add_field(name="Full Leaderboard", value=results_text, inline=False)
                 await channel.send(embed=embed)
             else:
