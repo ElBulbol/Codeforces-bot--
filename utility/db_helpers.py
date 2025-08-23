@@ -63,6 +63,7 @@ async def init_db() -> None:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS contests (
                 contest_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
                 cf_contest_id INTEGER,
                 name TEXT NOT NULL,
                 start_time TIMESTAMP,
@@ -250,12 +251,11 @@ async def delete_user(discord_id: str = None, cf_handle: str = None) -> bool:
 
 
 # Bot contest functions
-async def create_bot_contest(name: str, duration: int, start_time: str, unix_timestamp: int = None) -> int:
+async def create_bot_contest(name: str, duration: int, start_time: str, unix_timestamp: int = None, guild_id: int = None) -> int:
     """Create a new bot contest and return the contest_id."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         
-        # If unix_timestamp not provided, calculate it from start_time
         if unix_timestamp is None and start_time:
             try:
                 start_time_dt = datetime.fromisoformat(start_time)
@@ -264,8 +264,8 @@ async def create_bot_contest(name: str, duration: int, start_time: str, unix_tim
                 unix_timestamp = None
         
         cursor = await db.execute(
-            "INSERT INTO contests (name, duration, start_time, unix_timestamp, status, contest_type) VALUES (?, ?, ?, ?, ?, ?)",
-            (name, duration, start_time, unix_timestamp, "PENDING", "bot")
+            "INSERT INTO contests (name, duration, start_time, unix_timestamp, status, contest_type, guild_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (name, duration, start_time, unix_timestamp, "PENDING", "bot", guild_id)
         )
         await db.commit()
         return cursor.lastrowid
@@ -354,7 +354,6 @@ async def get_contest_solves_info(contest_id: int) -> Dict:
 
 async def join_contest(contest_id: int, discord_id: str, codeforces_handle: str) -> None:
     """Add user to contest participants."""
-    # Get user_id from users table
     user_data = await get_user_by_discord(discord_id)
     if not user_data:
         raise ValueError(f"User with discord_id {discord_id} not found")

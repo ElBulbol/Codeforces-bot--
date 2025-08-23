@@ -7,7 +7,7 @@ import aiohttp
 import re
 import time
 from utility.random_problems import get_random_problem
-from utility.constants import CHALLENGE_CHANNEL_ID
+from utility.config_manager import get_challenge_channel_id
 from utility.db_helpers import (
     get_cf_handle,
     get_custom_leaderboard,
@@ -359,7 +359,7 @@ class Challenges(commands.GroupCog, name = "challenge"):
         embed.set_footer(text=f"Challenge ID: {challenge_id} | Initiated by {interaction.user.display_name}")
         
         view = ChallengeView(self.bot, challenge_id, authenticated_members, problem, self)
-        
+        CHALLENGE_CHANNEL_ID = await get_challenge_channel_id(interaction.guild.id)
         challenge_channel = self.bot.get_channel(CHALLENGE_CHANNEL_ID) or interaction.channel
         await challenge_channel.send(f"New challenge from {interaction.user.mention} to {', '.join(m.mention for m in authenticated_members)}!", embed=embed, view=view)
         if challenge_channel != interaction.channel:
