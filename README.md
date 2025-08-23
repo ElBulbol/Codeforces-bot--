@@ -1,103 +1,125 @@
 # MUST CPC Discord Bot
 
-This bot provides several utilities for the MUST CPC community Discord server, including fetching Codeforces problems, managing roles, and organizing challenges.
+A comprehensive Discord bot designed for the MUST Competitive Programming Club, offering Codeforces integration, challenge management, leaderboards, and community engagement features.
 
----
+## 📋 Table of Contents
+- Features
+- Project Structure
+- Setup
+- Commands
+- Auto Actions
+- Contributing
 
-## Features
-- Fetch random or specific Codeforces problems based on tags and ratings.
-- Link and unlink Codeforces accounts to Discord users.
-- Organize challenges for solving Codeforces problems.
-- Manage roles for competitive programming (CP) members.
-- Track leaderboards for daily, weekly, monthly, and overall scores.
-- Notify CP members about contests and challenges.
+## ✨ Features
 
----
+- **Codeforces Integration**
+  - Link Discord accounts to Codeforces handles
+  - Fetch random or specific problems based on tags and difficulty ratings
+  - Track user progress and submissions
 
-## Setup
+- **Challenge System**
+  - Create challenges with specific problems
+  - Track participants and winners
+  - Award points for completed challenges
+
+- **Contests Management**
+  - Create temporary contests with custom parameters
+  - Maintain separate leaderboards for each contest
+  - Join/leave contest functionality
+
+- **Leaderboards**
+  - Daily, weekly, monthly, and all-time leaderboards
+  - Personal statistics tracking
+  - Ranking system for active members
+
+- **Role Management**
+  - Assign and remove competitive programming roles
+  - Automated role assignments based on activity
+
+## 🏗️ Project Structure
+
+```
+MUST-CPC-BOT/
+├── .env                  # Environment variables
+├── bot.py                # Main bot entry point
+├── requirements.txt      # Python dependencies
+├── dummy_data_gen.py     # Test data generator
+├── cogs/                 # Command modules
+│   ├── challenges.py     # Challenge system commands
+│   ├── misc.py           # Miscellaneous commands
+│   ├── roles.py          # Role management commands
+│   ├── codeforces/       # Codeforces integration
+│   │   ├── __init__.py
+│   │   ├── authenticate.py
+│   │   ├── cf_info.py
+│   │   └── pick_problem.py
+│   └── contests/         # Contest management
+│       ├── __init__.py
+│       ├── contest_builder.py
+│       └── contest_commands.py
+└── utility/              # Helper functions
+    ├── constants.py      # Global constants
+    ├── db_helpers.py     # Database interface
+    └── random_problems.py # Problem selection logic
+```
+
+## 🚀 Setup
 
 ### 1. Environment Variables
-Create a `.env` file in the root directory and add your Discord bot token:
+Create a [`.env`](.env ) file in the root directory with:
 ```
 DISCORD_TOKEN="your_bot_token_here"
 ```
 
 ### 2. Install Dependencies
-Run the following command to install the required Python packages:
 ```shell
 pip install -r requirements.txt
 ```
 
-### 3. Run the Bot
-Start the bot using:
+### 3. Database Setup
+The bot uses a local database stored in the `db/` directory (automatically created on first run).
+
+### 4. Run the Bot
 ```shell
 python bot.py
 ```
 
----
-
-## Commands
+## 🤖 Commands
 
 ### General Commands
-- `/help` – Shows a list of all available commands.
-- `/hello` – Greet the user.
-- `/hello_eyad` – Greet Eyad.
+- `/help` – Shows all available commands
 
 ### Codeforces Commands
-- `/link_cf <handle>` – Link your Discord account to a Codeforces handle.
-- `/de_link_cf [user]` – Unlink your Codeforces account (or another user's account if you are a moderator).
-- `/challenge <members> [tags] [rating]` – Challenge users with the `Auth` role to solve a Codeforces problem. Specify tags and rating for the problem or use "random".
+- `/authenticate <handle>` – Link Discord account to Codeforces handle
+- `/de_link_cf [user]` – Unlink Codeforces account
+- `/challenge <members> [tags] [rating]` – Challenge users to solve a problem
+- `/challenge info <challenge_id>` – Get detailed information about a challenge
 
 ### Leaderboard Commands
-- `/daily_leaderboard` – Show the daily leaderboard.
-- `/weekly_leaderboard` – Show the weekly leaderboard.
-- `/monthly_leaderboard` – Show the monthly leaderboard.
-- `/overall_leaderboard` – Show the all-time leaderboard.
-- `/my_stats` – Show your personal leaderboard statistics.
+- `/daily_leaderboard` – Show daily leaderboard
+- `/weekly_leaderboard` – Show weekly leaderboard
+- `/monthly_leaderboard` – Show monthly leaderboard
+- `/overall_leaderboard` – Show all-time leaderboard
+- `/my_stats` – Show personal statistics
 
 ### Management Commands (Moderators Only)
-- `/assign_role <member>` – Assign the CP role to a member.
-- `/remove_role <member>` – Remove the CP role from a member.
-- `/contest_notify <message>` – Notify all CP members about a contest.
+- `/assign_role <member>` – Assign CP role to a member
+- `/remove_role <member>` – Remove CP role from a member
+- `/contest_notify <message>` – Notify all CP members about a contest
 
-### Temporary Contest Commands
-- `/create_leader_board <name> <time> <problems>` – Create a temporary contest with a separate leaderboard.
-- `/leader-board-temp [contest_id]` – Show the leaderboard for a temporary contest.
-- `/join-contest <contest_id>` – Join a temporary contest.
-- `/end-contest <contest_id>` – End a temporary contest early.
+### Contest Commands
+- `/create_leader_board <name> <time> <problems>` – Create a temporary contest
+- `/leader-board-temp [contest_id]` – Show contest leaderboard
+- `/join-contest <contest_id>` – Join a temporary contest
+- `/end-contest <contest_id>` – End a contest early
 
----
+## 🤹 Auto Actions
+- Welcomes new members via DM
+- Replies "I agree" if a message contains "eyad m3aras"
 
-## Auto Actions
-- Welcomes new members via DM.
-- Replies “I agree” if a message contains “eyad m3aras”.
-
----
-
-## File Structure
-```
-.env
-.gitignore
-bot.py
-cf_links.db
-cf_links.json
-current-request.json
-discord.log
-leaderboard.db
-README.md
-requirements.txt
-temp_contests.db
-cogs/
-    codeforces.py
-    leaderboard.py
-    management.py
-    misc.py
-    temp_contests.py
-```
+## 👥 Contributing
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
-## Notes
-- Ensure the `cf_links.json` file exists to store Codeforces handle links.
-- The bot uses SQLite databases (`leaderboard.db`, `temp_contests.db`) for storing leaderboard and contest data.
-- Logs are stored in `discord.log` for debugging purposes.
+© MUST CPC Team | Made with ❤️ for competitive programmers
