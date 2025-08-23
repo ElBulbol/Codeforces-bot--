@@ -478,10 +478,12 @@ class ContestCommands(commands.GroupCog, name = "contest"):
             return
 
         embed = discord.Embed(title="📋 All Contests", description="List of all contests (newest first)", color=discord.Color.purple())
-        contest_list = [
-            f'{"🟡" if c["status"] == "PENDING" else "🟢" if c["status"] == "ACTIVE" else "🔴"} **#{c["contest_id"]}** - {c["name"]}\n└ {f"<t:{c["unix_timestamp"]}:D>" if c.get("unix_timestamp") else "Date unknown"} • Status: {c["status"]}'
-            for c in contests
-        ]
+        contest_list = []
+        for c in contests:
+            status_emoji = "🟡" if c["status"] == "PENDING" else "🟢" if c["status"] == "ACTIVE" else "🔴"
+            time_display = f"<t:{c['unix_timestamp']}:D>" if c.get("unix_timestamp") else "Date unknown"
+            line = f"{status_emoji} **#{c['contest_id']}** - {c['name']}\n└ {time_display} • Status: {c['status']}"
+            contest_list.append(line)
 
         full_text = "\n\n".join(contest_list)
         if len(full_text) <= 4096:
