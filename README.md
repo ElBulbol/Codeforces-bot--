@@ -2,7 +2,7 @@
 
 A comprehensive Discord bot designed for the MUST Competitive Programming Club, offering Codeforces integration, challenge management, leaderboards, and community engagement features.
 
-## 📋 Table of Contents
+## Table of Contents
 - Features
 - Project Structure
 - Setup
@@ -10,7 +10,7 @@ A comprehensive Discord bot designed for the MUST Competitive Programming Club, 
 - Auto Actions
 - Contributing
 
-## ✨ Features
+##  Features
 
 - **Codeforces Integration**
   - Link Discord accounts to Codeforces handles
@@ -36,34 +36,7 @@ A comprehensive Discord bot designed for the MUST Competitive Programming Club, 
   - Assign and remove competitive programming roles
   - Automated role assignments based on activity
 
-## 🏗️ Project Structure
-
-```
-MUST-CPC-BOT/
-├── .env                  # Environment variables
-├── bot.py                # Main bot entry point
-├── requirements.txt      # Python dependencies
-├── dummy_data_gen.py     # Test data generator
-├── cogs/                 # Command modules
-│   ├── challenges.py     # Challenge system commands
-│   ├── misc.py           # Miscellaneous commands
-│   ├── roles.py          # Role management commands
-│   ├── codeforces/       # Codeforces integration
-│   │   ├── __init__.py
-│   │   ├── authenticate.py
-│   │   ├── cf_info.py
-│   │   └── pick_problem.py
-│   └── contests/         # Contest management
-│       ├── __init__.py
-│       ├── contest_builder.py
-│       └── contest_commands.py
-└── utility/              # Helper functions
-    ├── constants.py      # Global constants
-    ├── db_helpers.py     # Database interface
-    └── random_problems.py # Problem selection logic
-```
-
-## 🚀 Setup
+## Setup
 
 ### 1. Environment Variables
 Create a [`.env`](.env ) file in the root directory with:
@@ -84,7 +57,7 @@ The bot uses a local database stored in the `db/` directory (automatically creat
 python bot.py
 ```
 
-## 🤖 Commands
+## Commands
 
 ### General Commands
 - `/help` – Shows all available commands
@@ -113,13 +86,7 @@ python bot.py
 - `/join-contest <contest_id>` – Join a temporary contest
 - `/end-contest <contest_id>` – End a contest early
 
-## 🤹 Auto Actions
-- Welcomes new members via DM
-- Replies "I agree" if a message contains "eyad m3aras"
-
-## 👥 Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
-
 ---
 
-© MUST CPC Team | Made with ❤️ for competitive programmers
+We made it to all competitive programmers in our community <3
+
