@@ -1,16 +1,8 @@
 # MUST CPC Discord Bot
 
-A comprehensive Discord bot designed for the MUST Competitive Programming Club, offering Codeforces integration, challenge management, leaderboards, and community engagement features.
+Engineered & built a full-fledged Competitive Programming platform for our ICPC community.
 
-## Table of Contents
-- Features
-- Project Structure
-- Setup
-- Commands
-- Auto Actions
-- Contributing
-
-##  Features
+## Features
 
 - **Codeforces Integration**
   - Link Discord accounts to Codeforces handles
@@ -32,61 +24,77 @@ A comprehensive Discord bot designed for the MUST Competitive Programming Club, 
   - Personal statistics tracking
   - Ranking system for active members
 
-- **Role Management**
+- **Role & Channel Management**
   - Assign and remove competitive programming roles
   - Automated role assignments based on activity
+  - Configure essential channels for contests, challenges, and announcements
 
 ## Setup
 
-### 1. Environment Variables
-Create a [`.env`](.env ) file in the root directory with:
-```
-DISCORD_TOKEN="your_bot_token_here"
-```
+1. **Environment Variables**
+   - Create a `.env` file in the root directory:
+     ```
+     DISCORD_TOKEN="your_bot_token_here"
+     ```
 
-### 2. Install Dependencies
-```shell
-pip install -r requirements.txt
-```
+2. **Install Dependencies**
+   ```shell
+   pip install -r requirements.txt
+   ```
 
-### 3. Database Setup
-The bot uses a local database stored in the `db/` directory (automatically created on first run).
+3. **Database Setup**
+   - The bot uses local SQLite databases in the `db/` directory (created automatically).
 
-### 4. Run the Bot
-```shell
-python bot.py
-```
+4. **Run the Bot**
+   ```shell
+   python bot.py
+   ```
 
 ## Commands
 
-### General Commands
+### General
 - `/help` – Shows all available commands
 
-### Codeforces Commands
+### Codeforces
 - `/authenticate <handle>` – Link Discord account to Codeforces handle
 - `/de_link_cf [user]` – Unlink Codeforces account
 - `/challenge <members> [tags] [rating]` – Challenge users to solve a problem
 - `/challenge info <challenge_id>` – Get detailed information about a challenge
 
-### Leaderboard Commands
+### Leaderboard
 - `/daily_leaderboard` – Show daily leaderboard
 - `/weekly_leaderboard` – Show weekly leaderboard
 - `/monthly_leaderboard` – Show monthly leaderboard
 - `/overall_leaderboard` – Show all-time leaderboard
 - `/my_stats` – Show personal statistics
 
-### Management Commands (Moderators Only)
-- `/assign_role <member>` – Assign CP role to a member
-- `/remove_role <member>` – Remove CP role from a member
-- `/contest_notify <message>` – Notify all CP members about a contest
+## Management Commands (Moderators Only)
 
-### Contest Commands
-- `/create_leader_board <name> <time> <problems>` – Create a temporary contest
-- `/leader-board-temp [contest_id]` – Show contest leaderboard
-- `/join-contest <contest_id>` – Join a temporary contest
-- `/end-contest <contest_id>` – End a contest early
+These commands are available for server administrators and are implemented in `server_setup.py`:
+
+- `/setroles`
+  - Set the essential roles for the server:
+    - CP Role (Competitive Programming participants)
+    - Moderator Role
+    - Authenticated Role (after authentication)
+    - Mentor Role (can create contests/challenges)
+
+- `/setchannels`
+  - Set the essential channels for the server:
+    - Contest Channel (for contest announcements and running contests)
+    - Challenge Channel (for posting challenges)
+    - Announcement Channel (for general bot announcements)
+
+- `/viewsettings`
+  - View the current role and channel settings for the server.
+
+## Contributing
+
+Pull requests and suggestions are welcome!  
+We made it for all competitive programmers in . 
+
+----
+
+### Huge shout-out to [MAyman007](https://github.com/MAyman007) for handeling the back-end and hosting.
 
 ---
-
-We made it to all competitive programmers in our community <3
-
