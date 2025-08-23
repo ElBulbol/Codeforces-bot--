@@ -412,10 +412,14 @@ class ContestCommands(commands.GroupCog, name = "contest"):
         leaderboard_display = "No participants yet."
         winner_display = ""
         if participants:
-            leaderboard_display = "\n".join([
-                f"{'🥇' if r == 1 else '🥈' if r == 2 else '🥉' if r == 3 else f'**{r}.**'} {self.bot.get_user(int(p['discord_id'])).mention if self.bot.get_user(int(p['discord_id'])) else f'ID: {p["discord_id"]}'} ({p['codeforces_handle']}) - **{p['score']} pts**"
-                for r, p in enumerate(participants, 1)
-            ])
+            leaderboard_lines = []
+            for r, p in enumerate(participants, 1):
+                medal = "🥇" if r == 1 else "🥈" if r == 2 else "🥉" if r == 3 else f"**{r}.**"
+                user = self.bot.get_user(int(p['discord_id']))
+                user_mention = user.mention if user else f"ID: {p['discord_id']}"
+                line = f"{medal} {user_mention} ({p['codeforces_handle']}) - **{p['score']} pts**"
+                leaderboard_lines.append(line)
+            leaderboard_display = "\n".join(leaderboard_lines)
             
             winner = participants[0]
             winner_user = self.bot.get_user(int(winner['discord_id']))
