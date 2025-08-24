@@ -5,10 +5,6 @@ from typing import Optional, Dict
 # This should point to the same database file used by the setup commands.
 DB_PATH = "db/roles_and_channels.db"
 
-# --- Cache ---
-# A simple cache to reduce database queries for the same guild.
-_settings_cache: Dict[int, Dict] = {}
-
 async def get_guild_settings(guild_id: int) -> Dict:
     """
     Fetches all settings for a given guild from the database and caches the result.
@@ -19,8 +15,6 @@ async def get_guild_settings(guild_id: int) -> Dict:
     Returns:
         A dictionary containing the settings, or an empty dictionary if not found.
     """
-    if guild_id in _settings_cache:
-        return _settings_cache[guild_id]
     
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -30,7 +24,6 @@ async def get_guild_settings(guild_id: int) -> Dict:
             
             if settings:
                 settings_dict = dict(settings)
-                _settings_cache[guild_id] = settings_dict
                 return settings_dict
     except aiosqlite.OperationalError as e:
         # NOTE: If you add new columns for role names, you may need to recreate your database table.
