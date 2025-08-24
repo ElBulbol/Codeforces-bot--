@@ -36,7 +36,6 @@ Engineered & built a full-fledged Competitive Programming platform for our ICPC 
     - [Git](https://git-scm.com/downloads)
     - Make sure they both are added to your `PATH`.
 
-
 1. **Clone the repository & change directory**
     ```shell
     git clone https://github.com/ElBulbol/MUST-CPC-BOT.git
@@ -69,43 +68,40 @@ Engineered & built a full-fledged Competitive Programming platform for our ICPC 
    python bot.py
    ```
 
-## Commands
+## Commands & Usage
+
+> Note: `<>` denotes required arguments and `[]` denotes optional arguments.
 
 ### General
-- `/help` – Shows all available commands
+- `/help` – Shows a list of all available commands.
+- `/authenticate` – Link your Discord account to a Codeforces handle (opens a modal).
+- `/deauthenticate [user]` – Remove Codeforces link for yourself or a specified user (mods can deauthenticate others).
+- `/pick_problem [tags] [rating] [min_solved]` – Pick a Codeforces problem by tags, optional rating, and minimum solved count.
+- `/show_status [user]` – Display a user's Codeforces profile and bot statistics.
 
-### Codeforces
-- `/authenticate <handle>` – Link Discord account to Codeforces handle
-- `/de_link_cf [user]` – Unlink Codeforces account
-- `/challenge <members> [tags] [rating]` – Challenge users to solve a problem
-- `/challenge info <challenge_id>` – Get detailed information about a challenge
+### Server Setup (Admin only)
+- `/setroles <cp_role> <mod_role> <auth_role> <mentor_role>` – Configure server roles used by the bot.
+- `/setchannels <contest_channel> <challenge_channel> <announcement_channel>` – Configure server channels used by the bot.
+- `/viewsettings` – View the currently configured role and channel settings for the server.
 
-### Leaderboard
-- `/daily_leaderboard` – Show daily leaderboard
-- `/weekly_leaderboard` – Show weekly leaderboard
-- `/monthly_leaderboard` – Show monthly leaderboard
-- `/overall_leaderboard` – Show all-time leaderboard
-- `/my_stats` – Show personal statistics
+### Contests
+- `/contest create` – Open the interactive contest builder (mentor role required).
+- `/contest start <contest_id>` – Immediately start a pending contest (mentor role required).
+- `/contest end <contest_id>` – Immediately end an active contest (mentor role required).
+- `/contest history` – List all past contests with IDs and dates.
+- `/contest info <contest_id>` – Show contest information and problems.
+- `/contest leaderboard [category] [limit]` – View contest leaderboard (categories: daily, weekly, monthly, overall).
+- `/contest notify <message>` – Send a notification to CP members and announcement channel (mentor role required).
 
-## Management Commands (Moderators Only)
+### Challenges
+- `/challenge create <members> [tags] [rating]` – Create a challenge targeting specified members.
+- `/challenge history [user] [limit]` – View recent challenge history (optionally for a specific user).
+- `/challenge info <challenge_id>` – Get detailed information about a specific challenge.
+- `/challenge leaderboard [category] [limit]` – View the challenges leaderboard (categories: daily, weekly, monthly, overall, solved).
 
-These commands are available for server administrators and are implemented in `server_setup.py`:
-
-- `/setroles`
-  - Set the essential roles for the server:
-    - CP Role (Competitive Programming participants)
-    - Moderator Role
-    - Authenticated Role (after authentication)
-    - Mentor Role (can create contests/challenges)
-
-- `/setchannels`
-  - Set the essential channels for the server:
-    - Contest Channel (for contest announcements and running contests)
-    - Challenge Channel (for posting challenges)
-    - Announcement Channel (for general bot announcements)
-
-- `/viewsettings`
-  - View the current role and channel settings for the server.
+### Roles
+- `/role assign <member>` – Assign the CP role to a member (moderator role required).
+- `/role remove <member>` – Remove the CP role from a member (moderator role required).
 
 ## Contributing
 
