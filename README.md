@@ -29,23 +29,42 @@ Engineered & built a full-fledged Competitive Programming platform for our ICPC 
   - Automated role assignments based on activity
   - Configure essential channels for contests, challenges, and announcements
 
-## Setup
+## Installation & Setup
 
-1. **Environment Variables**
-   - Create a `.env` file in the root directory:
-     ```
-     DISCORD_TOKEN="your_bot_token_here"
-     ```
+0. **Install prerequisits**
+    - [Python](https://www.python.org/downloads) 3.7 or higher
+    - [Git](https://git-scm.com/downloads)
+    - Make sure they both are added to your `PATH`.
 
-2. **Install Dependencies**
+
+1. **Clone the repository & change directory**
+    ```shell
+    git clone https://github.com/ElBulbol/MUST-CPC-BOT.git
+    cd MUST-CPC-BOT
+    ```
+
+2. **(Optional) Create a virtual environment and activate it**
    ```shell
-   pip install -r requirements.txt
+    python -m venv venv
+    # On Windows
+    .\venv\Scripts\activate
+    # On macOS/Linux
+    source venv/bin/activate
    ```
 
-3. **Database Setup**
-   - The bot uses local SQLite databases in the `db/` directory (created automatically).
+3. **Install the required dependencies**
+    ```shell
+    pip install -r requirements.txt
+    ```
 
-4. **Run the Bot**
+4. **Environment Variables**
+    - Go to [Discord Developer Portal](https://discord.com/developers/applications) → New Application → Add Bot, then copy the Bot Token from the "Bot" tab.
+    - Create a `.env` file in the root directory and put your token like the following example:
+    ```
+    DISCORD_TOKEN="your_bot_token_here"
+    ```
+
+5. **Run the Bot**
    ```shell
    python bot.py
    ```
